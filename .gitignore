@@ -1,1 +1,2 @@
-tgat_network_ids/data/*
+# .gitignore
+tgat_network_ids/data/combined/*.csv
