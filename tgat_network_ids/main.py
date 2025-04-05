@@ -69,7 +69,7 @@ DEFAULT_CONFIG = {
     },
     'train': {
         'lr': 0.001,
-        'weight_decay': 1e-5,
+        'weight_decay': 0.00001,
         'epochs': 50,
         'patience': 10,
         'batch_size': 1000
@@ -491,15 +491,15 @@ def main():
         # 訓練模型
         trainer, history, model_path = train_model(
             config, train_graph, 
-            labels=torch.tensor(y_train, dtype=torch.long),
+            labels=torch.tensor(y_train.values, dtype=torch.long),
             val_graph=test_graph, 
-            val_labels=torch.tensor(y_test, dtype=torch.long)
+            val_labels=torch.tensor(y_test.values, dtype=torch.long)
         )
         
         # 評估模型
         metrics = evaluate_model(
             trainer, test_graph, 
-            labels=torch.tensor(y_test, dtype=torch.long),
+            labels=torch.tensor(y_test.values, dtype=torch.long),
             class_names=class_names,
             visualize=args.visualize,
             config=config

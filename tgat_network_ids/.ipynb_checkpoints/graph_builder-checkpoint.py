@@ -18,6 +18,7 @@ import torch
 import dgl
 import logging
 from collections import defaultdict
+from tqdm import tqdm
 
 logging.basicConfig(level=logging.INFO, 
                     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -26,7 +27,7 @@ logger = logging.getLogger(__name__)
 class DynamicNetworkGraph:
     """動態網路圖結構類別"""
     
-    def __init__(self, device='cpu'):
+    def __init__(self, device='cuda'):
         """
         初始化動態網路圖結構
         
@@ -194,6 +195,44 @@ class DynamicNetworkGraph:
         
         logger.info(f"添加 {len(valid_edges)} 條新邊，當前共 {self.g.num_edges()} 條邊")
     
+    def add_edges_in_batches(self, src_nodes, dst_nodes, timestamps, edge_feats=None, batch_size=10000):
+        """
+        批量添加邊到圖
+        
+        參數:
+            src_nodes (list): 源節點ID列表
+            dst_nodes (list): 目標節點ID列表
+            timestamps (list): 邊的時間戳記列表
+            edge_feats (list, optional): 邊特徵列表
+            batch_size (int): 每批添加的邊數量
+        """
+        if len(src_nodes) != len(dst_nodes) or len(src_nodes) != len(timestamps):
+            raise ValueError("源節點、目標節點和時間戳記列表長度必須相同")
+        
+        if not src_nodes:
+            return
+        
+        total_edges = len(src_nodes)
+        logger.info(f"批量添加 {total_edges} 條邊，每批 {batch_size} 條")
+        
+        for i in range(0, total_edges, batch_size):
+            end_idx = min(i + batch_size, total_edges)
+            logger.info(f"處理邊批次 {i//batch_size + 1}/{(total_edges+batch_size-1)//batch_size}: {i} 到 {end_idx-1}")
+            
+            batch_src = src_nodes[i:end_idx]
+            batch_dst = dst_nodes[i:end_idx]
+            batch_timestamps = timestamps[i:end_idx]
+            
+            if edge_feats is not None:
+                batch_edge_feats = edge_feats[i:end_idx]
+            else:
+                batch_edge_feats = None
+                
+            self.add_edges(batch_src, batch_dst, batch_timestamps, batch_edge_feats)
+            
+            # 每批次處理後顯示進度
+            logger.info(f"批次 {i//batch_size + 1} 完成，當前共 {self.g.num_edges()} 條邊")
+    
     def get_node_features(self):
         """獲取節點特徵張量"""
         features = []
@@ -272,15 +311,15 @@ class DynamicNetworkGraph:
                                    device=self.device)
         
         # 設置節點特徵
-        self.temporal_g.ndata['h'] = self.get_node_features()
+        self.temporal_g.ndata['h'] = self.get_node_features().to('cuda')
         
         # 設置邊特徵和時間戳記
         if temporal_edge_feats:
-            self.temporal_g.edata['h'] = torch.tensor(temporal_edge_feats)
-            self.temporal_g.edata['time'] = torch.tensor(temporal_edge_times)
+            self.temporal_g.edata['h'] = torch.tensor(temporal_edge_feats).to('cuda')
+            self.temporal_g.edata['time'] = torch.tensor(temporal_edge_times).to('cuda')
         
         # 設置節點標籤
-        node_labels = self.get_node_labels()
+        node_labels = self.get_node_labels().to('cuda')
         if len(node_labels) > 0:
             self.temporal_g.ndata['label'] = node_labels
         
@@ -308,7 +347,7 @@ class DynamicNetworkGraph:
         
         # 添加邊 (如果提供)
         if src_nodes is not None and dst_nodes is not None and edge_timestamps is not None:
-            self.add_edges(src_nodes, dst_nodes, edge_timestamps, edge_feats)
+            self.add_edges_in_batches(src_nodes, dst_nodes, edge_timestamps, edge_feats, batch_size=10000)
         
         # 更新時間圖
         self.update_temporal_graph()
@@ -383,7 +422,7 @@ class DynamicNetworkGraph:
         
         # 添加自動生成的邊
         if src_nodes:
-            self.add_edges(src_nodes, dst_nodes, edge_timestamps, edge_feats)
+            self.add_edges_in_batches(src_nodes, dst_nodes, edge_timestamps, edge_feats, batch_size=10000)
         
         # 更新時間圖
         self.update_temporal_graph()

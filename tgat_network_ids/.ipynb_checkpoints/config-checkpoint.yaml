@@ -8,48 +8,48 @@ data:
   test_size: 0.2
   # 隨機種子
   random_state: 42
-  # 批次大小
-  batch_size: 1000
+  # 批次大小 (降低以減少內存使用)
+  batch_size: 256
 
 # 圖結構相關配置
 graph:
-  # 時間窗口大小（秒）
-  temporal_window: 600  # 10分鐘
+  # 時間窗口大小（秒）(縮小以減少邊數量)
+  temporal_window: 300  # 從 10 分鐘減少到 5 分鐘
 
 # 模型相關配置
 model:
-  # 隱藏層維度
-  hidden_dim: 64
-  # 輸出層維度
-  out_dim: 64
-  # 時間編碼維度
-  time_dim: 16
-  # TGAT 層數
-  num_layers: 2
-  # 注意力頭數
-  num_heads: 4
-  # 丟棄率
-  dropout: 0.1
+  # 隱藏層維度 (減小以降低計算量)
+  hidden_dim: 32
+  # 輸出層維度 (減小以降低計算量)
+  out_dim: 32
+  # 時間編碼維度 (減小以降低計算量)
+  time_dim: 8
+  # TGAT 層數 (減少以降低計算量)
+  num_layers: 1
+  # 注意力頭數 (減少以降低計算量)
+  num_heads: 2
+  # 丟棄率 (略微增加以加速收斂)
+  dropout: 0.2
 
 # 訓練相關配置
 train:
-  # 學習率
-  lr: 0.001
+  # 學習率 (略微增加以加速收斂)
+  lr: 0.002
   # 權重衰減係數
-  weight_decay: 1e-5
-  # 訓練輪數
-  epochs: 50
-  # 早停耐心值
-  patience: 10
-  # 訓練批次大小
-  batch_size: 1000
+  weight_decay: 0.00001
+  # 訓練輪數 (大幅減少以加快實驗)
+  epochs: 10
+  # 早停耐心值 (減少以加快停止)
+  patience: 3
+  # 訓練批次大小 (同上面的設置保持一致)
+  batch_size: 256
 
 # 即時檢測相關配置
 detection:
   # 攻擊判定閾值
   threshold: 0.7
   # 視覺化窗口大小
-  window_size: 100
+  window_size: 50
   # 更新間隔（秒）
   update_interval: 1
 

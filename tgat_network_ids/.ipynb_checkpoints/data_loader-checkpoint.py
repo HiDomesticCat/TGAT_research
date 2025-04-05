@@ -17,6 +17,7 @@ import numpy as np
 from sklearn.preprocessing import StandardScaler, LabelEncoder
 from sklearn.model_selection import train_test_split
 import logging
+from tqdm import tqdm
 
 logging.basicConfig(level=logging.INFO, 
                     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -196,26 +197,17 @@ class CICDDoSDataLoader:
     def get_temporal_edges(self):
         """
         建立時間性邊緣關係
-        
-        為了構建圖結構，我們需要定義節點間的連接關係。
-        在網路流量中，可以基於以下關係建立連接:
-        - 相同來源 IP 的封包
-        - 相同目標 IP 的封包
-        - 相同 (來源 IP, 目標 IP) 對的封包
-        - 時間接近的封包
-        
-        返回:
-            list of tuples: (source_idx, destination_idx, timestamp, edge_features)
         """
         # 重新載入原始資料以獲取 IP 位址和時間戳記資訊
         if self.df is None:
             self.load_data()
         
         edges = []
+        max_edges = 500000  # 限制邊數量
         
         # 獲取原始 IP 和時間戳記欄位
-        ip_src_col = 'Src IP' if 'Src IP' in self.df.columns else 'Source IP'
-        ip_dst_col = 'Dst IP' if 'Dst IP' in self.df.columns else 'Destination IP'
+        ip_src_col = 'Source IP' if 'Source IP' in self.df.columns else 'Src IP'
+        ip_dst_col = 'Destination IP' if 'Destination IP' in self.df.columns else 'Dst IP'
         time_col = 'Timestamp' if 'Timestamp' in self.df.columns else 'Flow Start Time'
         
         # 將時間戳記轉換為數值
@@ -226,15 +218,34 @@ class CICDDoSDataLoader:
         node_indices = {i: i for i in range(len(self.df))}
         
         # 根據 IP 對關係建立邊
+        logger.info("分析 IP 對關係...")
         ip_pairs = self.df.groupby([ip_src_col, ip_dst_col]).indices
+        logger.info(f"找到 {len(ip_pairs)} 個 IP 對")
         
         # 使用閾值定義什麼是"時間接近"
-        time_threshold = 1.0  # 1秒內的封包被視為時間接近
+        time_threshold = 0.5  # 縮短時間閾值以減少邊數量
         
-        for (src_ip, dst_ip), indices in ip_pairs.items():
-            indices_list = sorted(indices, key=lambda x: self.df.iloc[x][time_col])
+        # 限制每個 IP 對處理的封包數量
+        max_packets_per_pair = 50  # 每個 IP 對最多處理 50 個封包
+        
+        # 添加進度條
+        for i, ((src_ip, dst_ip), indices) in enumerate(tqdm(ip_pairs.items(), desc="建立時間性邊")):
+            # 每 1000 個 IP 對輸出一次日誌
+            if i % 1000 == 0:
+                logger.info(f"已處理 {i}/{len(ip_pairs)} 個 IP 對，當前邊數: {len(edges)}")
+            
+            # 如果邊數達到限制則提前結束
+            if len(edges) >= max_edges:
+                logger.info(f"已達到最大邊數限制 {max_edges}，提前結束邊創建")
+                break
+            
+            # 限制每個 IP 對的樣本數
+            if len(indices) > max_packets_per_pair:
+                indices = sorted(indices, key=lambda x: self.df.iloc[x][time_col])[:max_packets_per_pair]
             
             # 對於相同 IP 對中的每對連續封包，建立時間性邊
+            indices_list = sorted(indices, key=lambda x: self.df.iloc[x][time_col])
+            
             for i in range(len(indices_list) - 1):
                 idx1 = indices_list[i]
                 idx2 = indices_list[i + 1]
@@ -248,13 +259,17 @@ class CICDDoSDataLoader:
                 # 如果時間接近，建立邊
                 if time_diff <= time_threshold:
                     # 邊特徵: 時間差、封包大小比例等
-                    size1 = self.df.iloc[idx1]['Fwd Pkt Len Mean'] if 'Fwd Pkt Len Mean' in self.df.columns else 0
-                    size2 = self.df.iloc[idx2]['Fwd Pkt Len Mean'] if 'Fwd Pkt Len Mean' in self.df.columns else 0
+                    size1 = self.df.iloc[idx1]['Fwd Packet Length Mean'] if 'Fwd Packet Length Mean' in self.df.columns else 0
+                    size2 = self.df.iloc[idx2]['Fwd Packet Length Mean'] if 'Fwd Packet Length Mean' in self.df.columns else 0
                     
                     edge_feat = [time_diff, size2/size1 if size1 > 0 else 0]
                     
                     # 添加有向邊 (前 -> 後)
                     edges.append((node_indices[idx1], node_indices[idx2], time2, edge_feat))
+                    
+                    # 如果達到限制，提前退出內循環
+                    if len(edges) >= max_edges:
+                        break
         
         logger.info(f"建立了 {len(edges)} 條時間性邊")
         return edges
