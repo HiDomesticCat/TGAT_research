@@ -97,14 +97,15 @@ def save_config(config, config_path):
     except Exception as e:
         logger.error(f"保存配置時發生錯誤: {str(e)}")
 
-def evaluate_predictions(y_true, y_pred, y_proba=None):
+def evaluate_predictions(y_true, y_pred, y_proba=None, class_names=None):
     """
     評估預測結果
     
     參數:
         y_true (array-like): 真實標籤
         y_pred (array-like): 預測標籤
-        y_proba (array-like, optional): 預測概率 (用於ROC-AUC計算)
+        y_proba (array-like, optional): 預測概率
+        class_names (list, optional): 類別名稱
         
     返回:
         dict: 評估指標字典
@@ -125,7 +126,13 @@ def evaluate_predictions(y_true, y_pred, y_proba=None):
     metrics['confusion_matrix'] = confusion_matrix(y_true, y_pred)
     
     # 詳細分類報告
-    metrics['report'] = classification_report(y_true, y_pred, zero_division=0)
+    # 如果提供類別名稱，則使用
+    metrics['report'] = classification_report(
+        y_true, 
+        y_pred, 
+        zero_division=0, 
+        target_names=class_names if class_names else None
+    )
     
     # 如果提供概率，計算 ROC-AUC
     if y_proba is not None:

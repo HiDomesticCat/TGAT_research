@@ -29,36 +29,28 @@ logging.basicConfig(level=logging.INFO,
 logger = logging.getLogger(__name__)
 
 class TimeEncoding(nn.Module):
-    """時間編碼模組，將時間戳記映射到高維空間"""
-    
     def __init__(self, dimension):
-        """
-        初始化時間編碼模組
-        
-        參數:
-            dimension (int): 編碼後的維度
-        """
         super(TimeEncoding, self).__init__()
         self.dimension = dimension
-        self.w = nn.Linear(1, dimension)
-        self.w.weight = nn.Parameter((torch.from_numpy(1 / 10 ** np.linspace(0, 9, dimension)).float()).reshape(dimension, -1))
-        self.w.bias = nn.Parameter(torch.zeros(dimension))
+        
+        # 初始化權重和偏置
+        self.w = nn.Linear(1, dimension, bias=True)
+        
+        # 使用 Xavier 初始化權重
+        nn.init.xavier_uniform_(self.w.weight)
+        nn.init.zeros_(self.w.bias)
     
     def forward(self, t):
-        """
-        前向傳播
-        
-        參數:
-            t (torch.Tensor): 時間戳記張量 [batch_size, 1]
-            
-        返回:
-            torch.Tensor: 時間編碼 [batch_size, dimension]
-        """
-        # 確保 t 是二維張量
+        # 確保輸入是浮點型且二維
+        t = t.float()
         if t.dim() == 1:
             t = t.unsqueeze(1)
         
-        # 使用正弦函數進行時間編碼
+        # 確保權重也是浮點型
+        self.w.weight = nn.Parameter(self.w.weight.float())
+        self.w.bias = nn.Parameter(self.w.bias.float())
+        
+        # 使用餘弦函數進行編碼
         output = torch.cos(self.w(t))
         return output
 
@@ -98,57 +90,63 @@ class TemporalGATLayer(nn.Module):
             feat_drop=feat_drop,
             attn_drop=attn_drop,
             residual=residual,
-            activation=F.elu
+            activation=F.elu,
+            allow_zero_in_degree=True
         )
     
     def forward(self, g, h, time_tensor):
-        """
-        前向傳播
-        
-        參數:
-            g (dgl.DGLGraph): 輸入圖
-            h (torch.Tensor): 節點特徵 [num_nodes, in_dim]
-            time_tensor (torch.Tensor): 邊的時間戳記 [num_edges]
-            
-        返回:
-            torch.Tensor: 更新後的節點表示 [num_nodes, out_dim]
-        """
         # 獲得時間編碼
-        time_emb = self.time_enc(time_tensor)  # [num_edges, time_dim]
+        # 檢查時間特徵的長度，如果不匹配，則擴展或截斷
+        if len(time_tensor) != g.num_edges():
+            if len(time_tensor) < g.num_edges():
+                # 如果時間特徵少於邊數，重複最後一個值
+                time_tensor = torch.cat([
+                    time_tensor, 
+                    torch.ones(g.num_edges() - len(time_tensor), device=time_tensor.device) * time_tensor[-1]
+                ])
+            else:
+                # 如果時間特徵多於邊數，截斷
+                time_tensor = time_tensor[:g.num_edges()]
         
-        # 擴展時間編碼到所有節點
-        src, dst = g.edges()
+        time_emb = self.time_enc(time_tensor)  # [num_edges, time_dim]
         
         # 特徵丟棄
         h = self.feat_drop(h)
         
+        # 確保時間編碼的形狀正確
+        if time_emb.dim() == 1:
+            time_emb = time_emb.unsqueeze(0)
+        
         # 將時間特徵和邊特徵合併
         g.edata['time_feat'] = time_emb
         
-        # 將節點特徵和時間特徵合併
-        # 由於 GAT 是作用於節點特徵，我們需要將邊的時間信息轉移到節點
-        g.update_all(
-            # 消息函數: 將時間特徵和源節點特徵合併
-            fn.u_add_e('h', 'time_feat', 'm'),
-            # 聚合函數: 取均值
-            fn.mean('m', 'h_time')
-        )
+        def message_func(edges):
+            # 使用串聯而不是加法
+            time_expanded = edges.data['time_feat'].expand_as(edges.src['h'][:, :self.time_dim])
+            return {'m': torch.cat([edges.src['h'], time_expanded], dim=1)}
         
-        # 合併節點特徵和時間編碼
-        h_time = g.ndata.pop('h_time')
-        if h_time.shape[0] > 0:  # 檢查是否有節點
-            # 如果找不到時間特徵的節點，使用零向量
-            zero_time_feat = torch.zeros(h.shape[0] - h_time.shape[0], self.time_dim, device=h.device)
-            h_time = torch.cat([h_time, zero_time_feat], dim=0)
-        else:
-            # 如果沒有節點有時間特徵，則全部使用零向量
-            h_time = torch.zeros(h.shape[0], self.time_dim, device=h.device)
+        def reduce_func(nodes):
+            # 聚合消息，取平均
+            return {'h_time': nodes.mailbox['m'].mean(1)}
         
-        # 合併節點特徵和時間編碼
-        h_with_time = torch.cat([h, h_time], dim=1)
+        # 應用消息傳遞
+        g.update_all(message_func, reduce_func)
+        
+        # 處理時間特徵
+        h_time = g.ndata.get('h_time', torch.zeros(h.shape[0], h.shape[1] + self.time_dim, device=h.device))
+        
+        # 檢查並調整 h_time 的形狀
+        if h_time.shape[1] != self.in_dim + self.time_dim:
+            # 如果形狀不匹配，截斷或填充
+            if h_time.shape[1] > self.in_dim + self.time_dim:
+                h_time = h_time[:, :self.in_dim + self.time_dim]
+            else:
+                # 使用零填充
+                padding = torch.zeros(h_time.shape[0], self.in_dim + self.time_dim - h_time.shape[1], device=h_time.device)
+                h_time = torch.cat([h_time, padding], dim=1)
         
         # 應用 GAT 層
-        h_new = self.gat(g, h_with_time)
+        h_new = self.gat(g, h_time)
         
         # 合併多頭注意力結果
         h_new = h_new.view(h_new.shape[0], -1)

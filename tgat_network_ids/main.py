@@ -534,7 +534,7 @@ def main():
         
         # 載入模型
         in_dim = test_graph.ndata['h'].shape[1]
-        num_classes = len(torch.unique(torch.tensor(y_test)))
+        num_classes = len(torch.unique(torch.tensor(y_test.values)))
         
         model = TGAT(
             in_dim=in_dim,
@@ -559,7 +559,7 @@ def main():
         # 評估模型
         metrics = evaluate_model(
             trainer, test_graph, 
-            labels=torch.tensor(y_test, dtype=torch.long),
+            labels=torch.tensor(y_test.values, dtype=torch.long),
             class_names=class_names,
             visualize=args.visualize,
             config=config
