@@ -105,64 +105,55 @@ class TGATTrainer:
         
         return loss.item(), acc
     
-    def evaluate(self, graph, labels):
-        """
-        評估模型
-        
-        參數:
-            graph (dgl.DGLGraph): 驗證圖
-            labels (torch.Tensor): 節點標籤
-            
-        返回:
-            float: 驗證損失
-            float: 驗證精度
-            dict: 各類別的性能指標
-        """
-        self.model.eval()
-        
-        # 將圖和標籤移至指定裝置
+    def evaluate(self, graph, labels, class_names=None):
+        # 添加 class_names 參數
+        # 確保正確導入 classification_report
+        from sklearn.metrics import classification_report
+        # 將 graph 和 labels 移到同一設備
         graph = graph.to(self.device)
         labels = labels.to(self.device)
-        
+
+        # 移除 logits 到 metrics 的轉換中的重複代碼
         with torch.no_grad():
-            # 前向傳播
+            # 確保模型在正確設備
+            self.model.to(self.device)
+            
             logits = self.model(graph)
-            
-            # 計算損失
             loss = self.criterion(logits, labels)
-            
-            # 計算精度
+
+            # 預測
             _, pred = torch.max(logits, dim=1)
-            correct = (pred == labels).sum().item()
-            acc = correct / len(labels)
-            
-            # 將預測和標籤移回 CPU 進行詳細評估
+
+            # 將 tensor 移動到 CPU
             pred_cpu = pred.cpu().numpy()
             labels_cpu = labels.cpu().numpy()
-            
-            # 計算各類別性能指標
-            metrics = {
-                'accuracy': accuracy_score(labels_cpu, pred_cpu),
-                'precision_macro': precision_score(labels_cpu, pred_cpu, average='macro', zero_division=0),
-                'recall_macro': recall_score(labels_cpu, pred_cpu, average='macro', zero_division=0),
-                'f1_macro': f1_score(labels_cpu, pred_cpu, average='macro', zero_division=0),
-                'precision_weighted': precision_score(labels_cpu, pred_cpu, average='weighted', zero_division=0),
-                'recall_weighted': recall_score(labels_cpu, pred_cpu, average='weighted', zero_division=0),
-                'f1_weighted': f1_score(labels_cpu, pred_cpu, average='weighted', zero_division=0),
-                'confusion_matrix': confusion_matrix(labels_cpu, pred_cpu)
-            }
-            
+
             try:
-                # 各類別精度
-                metrics['precision_per_class'] = precision_score(labels_cpu, pred_cpu, average=None, zero_division=0)
-                # 各類別召回率
-                metrics['recall_per_class'] = recall_score(labels_cpu, pred_cpu, average=None, zero_division=0)
-                # 各類別 F1 分數
-                metrics['f1_per_class'] = f1_score(labels_cpu, pred_cpu, average=None, zero_division=0)
-            except:
-                logger.warning("無法計算各類別詳細指標")
-        
-        return loss.item(), acc, metrics
+                metrics = {
+                    'accuracy': accuracy_score(labels_cpu, pred_cpu),
+                    'precision_macro': precision_score(labels_cpu, pred_cpu, average='macro', zero_division=0),
+                    'recall_macro': recall_score(labels_cpu, pred_cpu, average='macro', zero_division=0),
+                    'f1_macro': f1_score(labels_cpu, pred_cpu, average='macro', zero_division=0),
+                    'precision_weighted': precision_score(labels_cpu, pred_cpu, average='weighted', zero_division=0),
+                    'recall_weighted': recall_score(labels_cpu, pred_cpu, average='weighted', zero_division=0),
+                    'f1_weighted': f1_score(labels_cpu, pred_cpu, average='weighted', zero_division=0),
+                    'confusion_matrix': confusion_matrix(labels_cpu, pred_cpu),
+                    'report': classification_report(
+                        labels_cpu, 
+                        pred_cpu, 
+                        target_names=class_names,
+                        zero_division=0
+                    )
+                }
+            except Exception as e:
+                logger.warning(f"計算指標時發生錯誤: {e}")
+                metrics = {}
+
+            # 計算精度
+            correct = (pred == labels).sum().item()
+            acc = correct / len(labels)
+
+            return loss.item(), acc, metrics
     
     def train(self, train_graph, train_labels, val_graph=None, val_labels=None, 
               epochs=100, patience=10, eval_every=1):
