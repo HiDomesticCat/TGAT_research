@@ -11,6 +11,7 @@
 """
 
 import networkx as nx
+import matplotlib
 import matplotlib.pyplot as plt
 import torch
 import numpy as np
@@ -66,7 +67,7 @@ class NetworkVisualizer:
         # 準備節點顏色
         if node_colors is None and node_labels is not None:
             # 根據標籤設置顏色
-            cmap = plt.cm.get_cmap('viridis', len(set(node_labels)))
+            cmap = matplotlib.colormaps['viridis']
             node_colors = [cmap(label) for label in node_labels]
         elif node_colors is None:
             # 預設顏色
@@ -99,15 +100,14 @@ class NetworkVisualizer:
             )
         
         # 設置標題
-        if title:
-            plt.title(title, fontsize=16)
+        plt.title(title or "Network Graph Visualization", fontsize=16)
         
         plt.axis('off')
         
         # 儲存圖表
         if save_path:
             plt.savefig(save_path, bbox_inches='tight')
-            logger.info(f"圖表已儲存至: {save_path}")
+            logger.info(f"Graph saved to: {save_path}")
         
         plt.tight_layout()
         
@@ -137,8 +137,12 @@ class NetworkVisualizer:
         if isinstance(labels, torch.Tensor):
             labels = labels.detach().cpu().numpy()
         
+        # 動態調整 perplexity
+        n_samples = embeddings.shape[0]
+        perplexity = min(30, n_samples - 1)  # 確保 perplexity 小於樣本數
+
         # 降維到 2D 以便視覺化
-        tsne = TSNE(n_components=2, random_state=42)
+        tsne = TSNE(n_components=2, random_state=42, perplexity=perplexity)
         embed_2d = tsne.fit_transform(embeddings)
         
         # 準備標籤名稱
@@ -159,15 +163,14 @@ class NetworkVisualizer:
         plt.legend()
         
         # 設置標題
-        if title:
-            plt.title(title, fontsize=16)
-        else:
-            plt.title("節點嵌入 t-SNE 視覺化", fontsize=16)
+        plt.title(title or "Node Embeddings t-SNE Visualization", fontsize=16)
+        plt.xlabel("Dimension 1")
+        plt.ylabel("Dimension 2")
         
         # 儲存圖表
         if save_path:
             plt.savefig(save_path, bbox_inches='tight')
-            logger.info(f"嵌入視覺化已儲存至: {save_path}")
+            logger.info(f"Embedding visualization saved to: {save_path}")
         
         plt.tight_layout()
         
@@ -192,10 +195,10 @@ class NetworkVisualizer:
         plt.figure(figsize=self.figsize)
         
         # 繪製異常分數
-        plt.plot(timestamps, scores, 'b-', alpha=0.6, label='異常分數')
+        plt.plot(timestamps, scores, 'b-', alpha=0.6, label='Anomaly Score')
         
         # 繪製閾值線
-        plt.axhline(y=threshold, color='r', linestyle='--', label=f'閾值 ({threshold})')
+        plt.axhline(y=threshold, color='r', linestyle='--', label=f'Threshold ({threshold})')
         
         # 標記檢測到的攻擊
         detected_indices = [i for i, score in enumerate(scores) if score > threshold]
@@ -203,7 +206,7 @@ class NetworkVisualizer:
             plt.scatter(
                 [timestamps[i] for i in detected_indices], 
                 [scores[i] for i in detected_indices], 
-                color='red', s=50, label='檢測到的攻擊'
+                color='red', s=50, label='Detected Attacks'
             )
         
         # 標記已知攻擊
@@ -211,17 +214,14 @@ class NetworkVisualizer:
             plt.scatter(
                 [timestamps[i] for i in attack_indices], 
                 [scores[i] for i in attack_indices], 
-                color='orange', marker='x', s=100, label='已知攻擊'
+                color='orange', marker='x', s=100, label='Known Attacks'
             )
         
-        plt.xlabel('時間')
-        plt.ylabel('異常分數')
+        plt.xlabel('Timestamp')
+        plt.ylabel('Anomaly Score')
         
         # 設置標題
-        if title:
-            plt.title(title, fontsize=16)
-        else:
-            plt.title("網路攻擊檢測結果", fontsize=16)
+        plt.title(title or "Network Attack Detection", fontsize=16)
         
         plt.legend()
         plt.grid(True, alpha=0.3)
@@ -229,14 +229,14 @@ class NetworkVisualizer:
         # 儲存圖表
         if save_path:
             plt.savefig(save_path, bbox_inches='tight')
-            logger.info(f"攻擊檢測視覺化已儲存至: {save_path}")
+            logger.info(f"Attack detection visualization saved to: {save_path}")
         
         plt.tight_layout()
         
         return plt.gcf()
     
     def visualize_dynamic_graph_evolution(self, graph_snapshots, node_labels_list=None, 
-                                         title_template="時間 {}", save_path=None):
+                                         title_template="Time {}", save_path=None):
         """
         視覺化動態圖演化 (動畫)
         
@@ -318,7 +318,7 @@ class NetworkVisualizer:
         # 儲存動畫
         if save_path:
             ani.save(save_path, writer='pillow', fps=1)
-            logger.info(f"動態圖演化動畫已儲存至: {save_path}")
+            logger.info(f"Dynamic graph evolution animation saved to: {save_path}")
         
         plt.tight_layout()
         plt.close()
@@ -344,28 +344,27 @@ class NetworkVisualizer:
         
         # 創建特徵重要性 DataFrame
         feature_imp = pd.DataFrame({
-            '特徵': feature_names,
-            '重要性': importances
+            'Feature': feature_names,
+            'Importance': importances
         })
         
         # 排序並選取前 N 個
-        feature_imp = feature_imp.sort_values('重要性', ascending=False).head(top_n)
+        feature_imp = feature_imp.sort_values('Importance', ascending=False).head(top_n)
         
         # 繪製條形圖
-        sns.barplot(x='重要性', y='特徵', data=feature_imp, palette='viridis')
+        sns.barplot(x='Importance', y='Feature', data=feature_imp, palette='viridis')
         
         # 設置標題
-        if title:
-            plt.title(title, fontsize=16)
-        else:
-            plt.title(f"前 {top_n} 個重要特徵", fontsize=16)
+        plt.title(title or f"Top {top_n} Important Features", fontsize=16)
+        plt.xlabel("Importance")
+        plt.ylabel("Features")
         
         plt.tight_layout()
         
         # 儲存圖表
         if save_path:
             plt.savefig(save_path, bbox_inches='tight')
-            logger.info(f"特徵重要性圖表已儲存至: {save_path}")
+            logger.info(f"Feature importance chart saved to: {save_path}")
         
         return plt.gcf()
     
@@ -393,9 +392,9 @@ class NetworkVisualizer:
         threshold_line, = plt.plot([], [], 'r--', alpha=0.7)
         alert_points, = plt.plot([], [], 'ro', markersize=8)
         
-        plt.xlabel('時間')
-        plt.ylabel('攻擊概率')
-        plt.title('即時網路攻擊檢測')
+        plt.xlabel('Time')
+        plt.ylabel('Attack Probability')
+        plt.title('Real-time Network Attack Detection')
         plt.grid(True, alpha=0.3)
         
         # 初始化函數
@@ -441,7 +440,7 @@ class NetworkVisualizer:
         # 儲存動畫
         if save_path:
             ani.save(save_path, writer='pillow', fps=10)
-            logger.info(f"即時檢測動畫已儲存至: {save_path}")
+            logger.info(f"Real-time detection animation saved to: {save_path}")
         
         plt.tight_layout()
         
@@ -470,15 +469,15 @@ if __name__ == "__main__":
     visualizer = NetworkVisualizer()
     
     # 測試圖視覺化
-    visualizer.visualize_graph(g, node_labels=labels, title="網路圖視覺化測試")
+    visualizer.visualize_graph(g, node_labels=labels, title="Network Graph Visualization Test")
     
     # 測試嵌入視覺化
     embeddings = torch.randn(num_nodes, 16)  # 模擬節點嵌入
     visualizer.visualize_embeddings(
         embeddings, 
         labels, 
-        label_names={0: "正常", 1: "攻擊"}, 
-        title="節點嵌入視覺化測試"
+        label_names={0: "Normal", 1: "Attack"}, 
+        title="Node Embedding Visualization Test"
     )
     
     # 測試攻擊檢測視覺化
@@ -491,7 +490,7 @@ if __name__ == "__main__":
         scores, 
         threshold=0.7,
         attack_indices=attack_indices,
-        title="攻擊檢測視覺化測試"
+        title="Attack Detection Visualization Test"
     )
     
     # 測試特徵重要性視覺化
@@ -501,9 +500,9 @@ if __name__ == "__main__":
     visualizer.plot_feature_importance(
         feature_names, 
         importances, 
-        title="特徵重要性測試", 
+        title="Feature Importance Test", 
         top_n=10
     )
     
     # 注意: 動態圖演化和即時檢測視覺化需要互動式環境才能正常顯示
-    print("視覺化工具測試完成")
+    print("Visualization tool test completed")

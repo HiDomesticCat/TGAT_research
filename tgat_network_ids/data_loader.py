@@ -18,6 +18,7 @@ from sklearn.preprocessing import StandardScaler, LabelEncoder
 from sklearn.model_selection import train_test_split
 import logging
 from tqdm import tqdm
+import gc
 
 logging.basicConfig(level=logging.INFO, 
                     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -57,13 +58,21 @@ class CICDDoSDataLoader:
                         if f.endswith('.csv')]
             
             df_list = []
-            for file in all_files:
+            for file in tqdm(all_files, desc="載入資料集"):
                 try:
-                    df = pd.read_csv(file, low_memory=False)
+                    # 使用低記憶體載入
+                    df = pd.read_csv(file, low_memory=False, dtype={
+                        'Protocol': 'category',
+                        'Destination Port': 'int32',
+                        'Flow Duration': 'float32'
+                    })
                     df_list.append(df)
                     logger.info(f"成功載入資料: {file}, 形狀: {df.shape}")
                 except Exception as e:
                     logger.error(f"載入 {file} 時發生錯誤: {str(e)}")
+                
+                # 及時釋放記憶體
+                gc.collect()
             
             if df_list:
                 self.df = pd.concat(df_list, ignore_index=True)
@@ -81,99 +90,96 @@ class CICDDoSDataLoader:
         """預處理資料集"""
         if self.df is None:
             self.load_data()
-        
+
         logger.info("開始資料預處理...")
-        
+
         # 清理列名，移除前後空格
         self.df.columns = [col.strip() for col in self.df.columns]
 
-        # 檢查標籤欄位名稱
-        if 'Label' in self.df.columns:
-            label_column = 'Label'
-        elif 'label' in self.df.columns:
-            label_column = 'label'
-        else:
-            # 如果還是找不到標籤欄位，查找包含 "label" 的欄位
-            possible_label_cols = [col for col in self.df.columns if 'label' in col.lower()]
-            if possible_label_cols:
-                label_column = possible_label_cols[0]
-                logger.info(f"使用可能的標籤欄位: {label_column}")
-            # 如果找不到相關欄位，嘗試使用最後一欄（在您的資料中是 'Label'）
-            elif len(self.df.columns) > 0:
-                label_column = self.df.columns[-1]
-                logger.info(f"使用最後一欄作為標籤: {label_column}")
-            else:
-                # 如果上述方法都失敗，拋出異常
-                raise ValueError("找不到標籤欄位，請檢查資料格式")
-        
         # 處理缺失值
         logger.info("處理缺失值...")
-        self.df = self.df.replace([np.inf, -np.inf], np.nan)
-        self.df = self.df.fillna(0)
-        
+        self.df.replace([np.inf, -np.inf], np.nan, inplace=True)
+
+        # 分別處理不同類型的欄位
+        numeric_columns = self.df.select_dtypes(include=['int64', 'float64', 'int32', 'float32']).columns
+
+        # 對數值列填充中位數
+        for col in numeric_columns:
+            self.df[col].fillna(self.df[col].median())
+
+        # 對分類列填充最常見值
+        categorical_columns = self.df.select_dtypes(include=['object', 'category']).columns
+        for col in categorical_columns:
+            self.df[col].fillna(self.df[col].mode()[0])
+
         # 檢查並移除常數特徵
         nunique = self.df.nunique()
-        cols_to_drop = nunique[nunique == 1].index
-        self.df = self.df.drop(columns=cols_to_drop)
+        cols_to_drop = nunique[nunique <= 1].index
+        self.df.drop(columns=cols_to_drop, inplace=True)
         logger.info(f"移除 {len(cols_to_drop)} 個常數特徵")
-        
+
+        # 自動檢測標籤欄位
+        label_column = self._detect_label_column()
+
+        # 預處理 IP 和其他特殊欄位
+        ip_columns = [col for col in self.df.columns if 'ip' in col.lower()]
+        for col in ip_columns:
+            # 將 IP 地址轉換為分類編碼
+            self.df[col] = pd.Categorical(self.df[col]).codes
+
+        # 處理時間戳記欄位
+        timestamp_columns = [col for col in self.df.columns if 'timestamp' in col.lower()]
+        for col in timestamp_columns:
+            try:
+                self.df[col] = pd.to_datetime(self.df[col]).astype(int) / 10**9
+            except:
+                # 如果轉換失敗，嘗試編碼
+                self.df[col] = pd.Categorical(self.df[col]).codes
+
         # 處理分類特徵
-        logger.info("編碼分類特徵...")
-        # 假設 'Protocol' 是分類特徵
-        if 'Protocol' in self.df.columns:
-            self.df = pd.get_dummies(self.df, columns=['Protocol'], drop_first=True)
-        
-        # 時間戳記處理
-        timestamp_cols = [col for col in self.df.columns if 'time' in col.lower()]
-        if timestamp_cols:
-            logger.info(f"處理時間特徵: {timestamp_cols}")
-            for col in timestamp_cols:
-                # 如果是時間戳記欄位，轉換為UNIX時間戳 (秒)
-                try:
-                    self.df[col] = pd.to_datetime(self.df[col]).astype(int) / 10**9
-                except:
-                    # 如果已經是數值，則不需轉換
-                    pass
-        
+        categorical_columns = self.df.select_dtypes(include=['object', 'category']).columns
+        for col in categorical_columns:
+            if col != label_column:
+                self.df[col] = pd.Categorical(self.df[col]).codes
+
         # 標籤編碼
         logger.info("編碼標籤...")
-        # 將攻擊類型 (BENIGN, DoS, DDoS 等) 轉為數字編碼
         self.df[label_column] = self.label_encoder.fit_transform(self.df[label_column])
-        
-        # 分離特徵和標籤
-        logger.info("分離特徵和標籤...")
-        # 清理所有欄位名稱，移除前後空格
-        self.df.columns = [col.strip() for col in self.df.columns]
 
-        # 排除 IP 地址、時間戳記等不適合用作特徵的欄位
-        # 使用部分匹配來識別欄位
-        excluded_patterns = ['flow id', 'ip', 'source ip', 'destination ip', 'src ip', 'dst ip', 'timestamp', 'unnamed']
-        excluded_cols = []
+        # 排除不需要的特徵欄位
+        excluded_patterns = ['flow id', 'timestamp', 'unnamed']
+        feature_cols = [
+            col for col in self.df.columns 
+            if not any(pattern in col.lower() for pattern in excluded_patterns)
+            and col != label_column 
+            and self.df[col].dtype in ['int64', 'float64', 'int32', 'float32']
+        ]
 
-        for col in self.df.columns:
-            # 檢查是否含有任何排除模式
-            if any(pattern in col.lower() for pattern in excluded_patterns):
-                excluded_cols.append(col)
-            # 檢查是否為物件類型（通常表示非數值）
-            elif self.df[col].dtype == 'object':
-                excluded_cols.append(col)
-
-        logger.info(f"排除以下欄位: {excluded_cols}")
-
-        # 獲取特徵欄位
-        feature_cols = [col for col in self.df.columns 
-                        if col != label_column and col not in excluded_cols]
-        
+        # 準備特徵和標籤
         self.feature_names = feature_cols
         self.features = self.df[feature_cols]
         self.target = self.df[label_column]
-        
+
         # 特徵標準化
         logger.info("特徵標準化...")
         self.features = self.scaler.fit_transform(self.features)
-        
+
         logger.info("資料預處理完成")
+        gc.collect()  # 釋放記憶體
+
         return self.features, self.target
+    
+    def _detect_label_column(self):
+        """自動檢測標籤欄位"""
+        possible_label_columns = ['Label', 'label', 'attack_type']
+        for col in possible_label_columns:
+            if col in self.df.columns:
+                return col
+        
+        # 如果找不到標準標籤欄位，使用最後一個欄位
+        label_column = self.df.columns[-1]
+        logger.warning(f"未找到標準標籤欄位，使用預設欄位: {label_column}")
+        return label_column
     
     def split_data(self):
         """拆分訓練和測試資料集"""
@@ -302,7 +308,7 @@ class CICDDoSDataLoader:
 # 測試資料載入器
 if __name__ == "__main__":
     # 假設 CICDDoS2019 資料集位於當前目錄的 'data' 子目錄
-    data_path = "./data"
+    data_path = "./data/test_v1"
     
     loader = CICDDoSDataLoader(data_path)
     
