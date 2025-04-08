@@ -669,4 +669,28 @@ class MemoryOptimizedTGATTrainer:
         plt.xlabel('Epoch')
         plt.ylabel('損失')
         plt.title('訓練與驗證損失')
-        plt.
+        plt.legend()
+        plt.grid(True)
+        
+        # 繪製精度曲線
+        plt.subplot(1, 2, 2)
+        plt.plot(self.train_accuracies, label='訓練精度')
+        if self.val_accuracies:
+            plt.plot(self.val_accuracies, label='驗證精度')
+        plt.xlabel('Epoch')
+        plt.ylabel('精度')
+        plt.title('訓練與驗證精度')
+        plt.legend()
+        plt.grid(True)
+        
+        plt.tight_layout()
+        
+        # 保存圖表
+        if save_path:
+            os.makedirs(os.path.dirname(save_path), exist_ok=True)
+            plt.savefig(save_path)
+            logger.info(f"訓練歷史紀錄圖表已保存至: {save_path}")
+        
+        plt.show()
+        
+        return
