@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # python main.py --config config.yaml --mode test --model_path ./models/best_model.pt --data_path ./data/DrDoS_MSSQL.csv --visualize
 
 # nvidia-smi
