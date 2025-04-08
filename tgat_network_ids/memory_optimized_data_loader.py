@@ -27,9 +27,11 @@ from datetime import datetime
 
 # 導入記憶體優化工具
 from memory_utils import (
-    memory_mapped_array, save_dataframe_chunked, load_dataframe_chunked,
-    optimize_dataframe_memory, clean_memory, memory_usage_decorator,
-    print_memory_usage, get_memory_usage
+    memory_mapped_array, load_memory_mapped_array, save_dataframe_chunked, 
+    load_dataframe_chunked, optimize_dataframe_memory, clean_memory, 
+    memory_usage_decorator, track_memory_usage, print_memory_usage, 
+    get_memory_usage, get_memory_optimization_suggestions, 
+    adaptive_batch_size, detect_memory_leaks, limit_gpu_memory
 )
 
 logging.basicConfig(level=logging.INFO, 
@@ -466,22 +468,29 @@ class MemoryOptimizedDataLoader:
     
     def _load_preprocessed_data(self):
         """加載預處理後的資料"""
-        logger.info(f"加載預處理資料從: {self.preprocessed_path}")
-        
-        files = self._get_preprocessed_files()
-        
-        # 加載特徵
-        if self.use_memory_mapping:
-            # 使用記憶體映射加載
-            self.features = np.memmap(
-                files['features'],
-                dtype=np.float32,
-                mode='r',
-                shape=tuple(np.load(f"{files['features']}.shape.npy"))
-            )
-        else:
-            # 直接加載 numpy 數組
-            self.features = np.load(files['features'])
+        with track_memory_usage("加載預處理資料", detailed=True):
+            logger.info(f"加載預處理資料從: {self.preprocessed_path}")
+            
+            files = self._get_preprocessed_files()
+            
+            # 加載特徵
+            if self.use_memory_mapping:
+                # 使用記憶體映射加載
+                try:
+                    # 使用新的加載函數
+                    self.features = load_memory_mapped_array(files['features'], mode='r')
+                except Exception as e:
+                    logger.warning(f"使用新函數加載記憶體映射失敗: {str(e)}，嘗試舊方法")
+                    # 回退到舊方法
+                    self.features = np.memmap(
+                        files['features'],
+                        dtype=np.float32,
+                        mode='r',
+                        shape=tuple(np.load(f"{files['features']}.shape.npy"))
+                    )
+            else:
+                # 直接加載 numpy 數組
+                self.features = np.load(files['features'])
         
         # 加載標籤
         target_values = np.load(files['target'])
@@ -695,12 +704,13 @@ class MemoryOptimizedDataLoader:
         return edges
     
     @memory_usage_decorator
-    def get_sample_batch(self, batch_size=None):
+    def get_sample_batch(self, batch_size=None, memory_threshold=0.8):
         """
         獲取樣本批次，用於模擬動態圖更新
         
         參數:
             batch_size (int, optional): 批次大小，如果為 None 則使用配置中的批次大小
+            memory_threshold (float): 記憶體使用率閾值，超過此值將減小批次大小
             
         返回:
             tuple: (批次資料, 批次標籤, 批次索引)
@@ -708,25 +718,73 @@ class MemoryOptimizedDataLoader:
         if self.features is None or self.target is None:
             self.preprocess()
         
+        # 使用自適應批次大小
         if batch_size is None:
-            batch_size = self.batch_size
+            initial_batch_size = self.batch_size
+            batch_size = adaptive_batch_size(
+                initial_batch_size=initial_batch_size,
+                memory_threshold=memory_threshold,
+                min_batch_size=16
+            )
+            
+            if batch_size < initial_batch_size:
+                logger.info(f"使用自適應批次大小: {batch_size} (原始: {initial_batch_size})")
         
         total_samples = len(self.target)
         if batch_size > total_samples:
             batch_size = total_samples
         
-        # 隨機抽樣
-        indices = np.random.choice(total_samples, batch_size, replace=False)
-        
-        # 獲取批次資料
-        if self.use_memory_mapping:
-            batch_features = self.features[indices].copy()  # 複製以避免修改原始數據
-        else:
-            batch_features = self.features[indices]
-        
-        batch_labels = self.target.iloc[indices].values if isinstance(self.target, pd.Series) else self.target[indices]
+        # 使用 track_memory_usage 上下文管理器追蹤記憶體使用
+        with track_memory_usage("獲取樣本批次"):
+            # 隨機抽樣
+            indices = np.random.choice(total_samples, batch_size, replace=False)
+            
+            # 獲取批次資料
+            if self.use_memory_mapping:
+                batch_features = self.features[indices].copy()  # 複製以避免修改原始數據
+            else:
+                batch_features = self.features[indices]
+            
+            batch_labels = self.target.iloc[indices].values if isinstance(self.target, pd.Series) else self.target[indices]
         
         return batch_features, batch_labels, indices
+    
+    def check_for_memory_leaks(self, iterations=3):
+        """
+        檢測記憶體洩漏
+        
+        通過多次執行數據加載和預處理操作，檢測是否存在記憶體洩漏。
+        
+        參數:
+            iterations (int): 執行迭代次數
+            
+        返回:
+            dict: 記憶體洩漏檢測結果
+        """
+        logger.info("開始檢測記憶體洩漏...")
+        
+        # 定義測試函數
+        def test_data_operations():
+            # 加載小批次數據
+            if self.df is not None:
+                sample_df = self.df.sample(min(1000, len(self.df)))
+                # 執行一些典型操作
+                sample_df = optimize_dataframe_memory(sample_df)
+                # 獲取樣本批次
+                if self.features is not None and self.target is not None:
+                    self.get_sample_batch(batch_size=100)
+            clean_memory()
+        
+        # 使用記憶體洩漏檢測工具
+        result = detect_memory_leaks(iterations=iterations, func=test_data_operations)
+        
+        # 輸出結果
+        if result['has_leak']:
+            logger.warning("檢測到可能的記憶體洩漏，請檢查代碼中的資源釋放")
+        else:
+            logger.info("未檢測到明顯的記憶體洩漏")
+        
+        return result
 
 # 測試資料載入器
 if __name__ == "__main__":
