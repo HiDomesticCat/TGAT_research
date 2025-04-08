@@ -2,12 +2,12 @@
 # -*- coding: utf-8 -*-
 
 """
-視覺化模組
+Visualization Module
 
-此模組負責:
-1. 圖結構視覺化
-2. 模型預測結果視覺化
-3. 網路攻擊檢測結果呈現
+This module is responsible for:
+1. Graph structure visualization
+2. Model prediction result visualization
+3. Network attack detection result presentation
 """
 
 import networkx as nx
@@ -27,55 +27,55 @@ logging.basicConfig(level=logging.INFO,
 logger = logging.getLogger(__name__)
 
 class NetworkVisualizer:
-    """網路圖視覺化工具"""
+    """Network Graph Visualization Tool"""
     
     def __init__(self, figsize=(12, 10)):
         """
-        初始化視覺化工具
+        Initialize visualization tool
         
-        參數:
-            figsize (tuple): 圖表尺寸
+        Parameters:
+            figsize (tuple): Figure size
         """
         self.figsize = figsize
     
     def visualize_graph(self, g, node_labels=None, node_colors=None, title=None, save_path=None):
         """
-        視覺化圖結構
+        Visualize graph structure
         
-        參數:
-            g (dgl.DGLGraph): DGL 圖
-            node_labels (list, optional): 節點標籤列表
-            node_colors (list, optional): 節點顏色列表
-            title (str, optional): 圖表標題
-            save_path (str, optional): 儲存路徑
+        Parameters:
+            g (dgl.DGLGraph): DGL graph
+            node_labels (list, optional): Node label list
+            node_colors (list, optional): Node color list
+            title (str, optional): Chart title
+            save_path (str, optional): Save path
             
-        返回:
-            matplotlib.figure.Figure: 圖表物件
+        Returns:
+            matplotlib.figure.Figure: Figure object
         """
         plt.figure(figsize=self.figsize)
         
-        # 確保圖在 CPU 上，然後轉換為 NetworkX 圖
+        # Ensure graph is on CPU, then convert to NetworkX
         if g.device.type != 'cpu':
             g = g.cpu()
         nx_g = dgl.to_networkx(g)
         
-        # 定義佈局
+        # Define layout
         if g.num_nodes() < 100:
             pos = nx.spring_layout(nx_g, seed=42)
         else:
-            # 大型圖使用更快的佈局算法
+            # Use faster layout algorithm for large graphs
             pos = nx.kamada_kawai_layout(nx_g)
         
-        # 準備節點顏色
+        # Prepare node colors
         if node_colors is None and node_labels is not None:
-            # 根據標籤設置顏色
+            # Set colors based on labels
             cmap = matplotlib.colormaps['viridis']
             node_colors = [cmap(label) for label in node_labels]
         elif node_colors is None:
-            # 預設顏色
+            # Default color
             node_colors = 'skyblue'
         
-        # 繪製節點
+        # Draw nodes
         nx.draw_networkx_nodes(
             nx_g, pos, 
             node_color=node_colors, 
@@ -83,7 +83,7 @@ class NetworkVisualizer:
             alpha=0.8
         )
         
-        # 繪製邊
+        # Draw edges
         nx.draw_networkx_edges(
             nx_g, pos, 
             width=1.0, 
@@ -93,20 +93,20 @@ class NetworkVisualizer:
             arrowstyle='->'
         )
         
-        # 繪製節點標籤
-        if g.num_nodes() < 50:  # 只在節點數量適中時顯示標籤
+        # Draw node labels
+        if g.num_nodes() < 50:  # Only show labels when node count is moderate
             nx.draw_networkx_labels(
                 nx_g, pos, 
                 font_size=10, 
                 font_family='sans-serif'
             )
         
-        # 設置標題
+        # Set title
         plt.title(title or "Network Graph Visualization", fontsize=16)
         
         plt.axis('off')
         
-        # 儲存圖表
+        # Save chart
         if save_path:
             plt.savefig(save_path, bbox_inches='tight')
             logger.info(f"Graph saved to: {save_path}")
@@ -117,41 +117,41 @@ class NetworkVisualizer:
     
     def visualize_embeddings(self, embeddings, labels, label_names=None, title=None, save_path=None):
         """
-        視覺化節點嵌入
+        Visualize node embeddings
         
-        參數:
-            embeddings (torch.Tensor or np.ndarray): 節點嵌入矩陣 [num_nodes, embed_dim]
-            labels (list or torch.Tensor): 節點標籤
-            label_names (list, optional): 標籤名稱列表
-            title (str, optional): 圖表標題
-            save_path (str, optional): 儲存路徑
+        Parameters:
+            embeddings (torch.Tensor or np.ndarray): Node embedding matrix [num_nodes, embed_dim]
+            labels (list or torch.Tensor): Node labels
+            label_names (list, optional): Label name list
+            title (str, optional): Chart title
+            save_path (str, optional): Save path
             
-        返回:
-            matplotlib.figure.Figure: 圖表物件
+        Returns:
+            matplotlib.figure.Figure: Figure object
         """
         plt.figure(figsize=self.figsize)
         
-        # 確保嵌入是 NumPy 陣列
+        # Ensure embeddings are NumPy arrays
         if isinstance(embeddings, torch.Tensor):
             embeddings = embeddings.detach().cpu().numpy()
         
-        # 確保標籤是 NumPy 陣列
+        # Ensure labels are NumPy arrays
         if isinstance(labels, torch.Tensor):
             labels = labels.detach().cpu().numpy()
         
-        # 動態調整 perplexity
+        # Dynamically adjust perplexity
         n_samples = embeddings.shape[0]
-        perplexity = min(30, n_samples - 1)  # 確保 perplexity 小於樣本數
+        perplexity = min(30, n_samples - 1)  # Ensure perplexity is less than sample count
 
-        # 降維到 2D 以便視覺化
+        # Reduce dimensions to 2D for visualization
         tsne = TSNE(n_components=2, random_state=42, perplexity=perplexity)
         embed_2d = tsne.fit_transform(embeddings)
         
-        # 準備標籤名稱
+        # Prepare label names
         if label_names is None:
             label_names = {i: f"Class {i}" for i in set(labels)}
         
-        # 繪製散點圖
+        # Draw scatter plot
         unique_labels = set(labels)
         for label in unique_labels:
             indices = [i for i, l in enumerate(labels) if l == label]
@@ -164,12 +164,12 @@ class NetworkVisualizer:
         
         plt.legend()
         
-        # 設置標題
+        # Set title
         plt.title(title or "Node Embeddings t-SNE Visualization", fontsize=16)
         plt.xlabel("Dimension 1")
         plt.ylabel("Dimension 2")
         
-        # 儲存圖表
+        # Save chart
         if save_path:
             plt.savefig(save_path, bbox_inches='tight')
             logger.info(f"Embedding visualization saved to: {save_path}")
@@ -181,28 +181,28 @@ class NetworkVisualizer:
     def visualize_attack_detection(self, timestamps, scores, threshold=0.5, 
                                   attack_indices=None, title=None, save_path=None):
         """
-        視覺化攻擊檢測結果
+        Visualize attack detection results
         
-        參數:
-            timestamps (list): 時間戳記列表
-            scores (list): 異常分數列表
-            threshold (float): 攻擊判定閾值
-            attack_indices (list, optional): 已知攻擊的索引
-            title (str, optional): 圖表標題
-            save_path (str, optional): 儲存路徑
+        Parameters:
+            timestamps (list): Timestamp list
+            scores (list): Anomaly score list
+            threshold (float): Attack determination threshold
+            attack_indices (list, optional): Known attack indices
+            title (str, optional): Chart title
+            save_path (str, optional): Save path
             
-        返回:
-            matplotlib.figure.Figure: 圖表物件
+        Returns:
+            matplotlib.figure.Figure: Figure object
         """
         plt.figure(figsize=self.figsize)
         
-        # 繪製異常分數
+        # Draw anomaly scores
         plt.plot(timestamps, scores, 'b-', alpha=0.6, label='Anomaly Score')
         
-        # 繪製閾值線
+        # Draw threshold line
         plt.axhline(y=threshold, color='r', linestyle='--', label=f'Threshold ({threshold})')
         
-        # 標記檢測到的攻擊
+        # Mark detected attacks
         detected_indices = [i for i, score in enumerate(scores) if score > threshold]
         if detected_indices:
             plt.scatter(
@@ -211,7 +211,7 @@ class NetworkVisualizer:
                 color='red', s=50, label='Detected Attacks'
             )
         
-        # 標記已知攻擊
+        # Mark known attacks
         if attack_indices:
             plt.scatter(
                 [timestamps[i] for i in attack_indices], 
@@ -222,13 +222,13 @@ class NetworkVisualizer:
         plt.xlabel('Timestamp')
         plt.ylabel('Anomaly Score')
         
-        # 設置標題
+        # Set title
         plt.title(title or "Network Attack Detection", fontsize=16)
         
         plt.legend()
         plt.grid(True, alpha=0.3)
         
-        # 儲存圖表
+        # Save chart
         if save_path:
             plt.savefig(save_path, bbox_inches='tight')
             logger.info(f"Attack detection visualization saved to: {save_path}")
@@ -240,47 +240,47 @@ class NetworkVisualizer:
     def visualize_dynamic_graph_evolution(self, graph_snapshots, node_labels_list=None, 
                                          title_template="Time {}", save_path=None):
         """
-        視覺化動態圖演化 (動畫)
+        Visualize dynamic graph evolution (animation)
         
-        參數:
-            graph_snapshots (list): DGL 圖快照列表
-            node_labels_list (list, optional): 每個快照的節點標籤列表
-            title_template (str): 標題模板
-            save_path (str, optional): 儲存路徑 (GIF 格式)
+        Parameters:
+            graph_snapshots (list): DGL graph snapshot list
+            node_labels_list (list, optional): Node label list for each snapshot
+            title_template (str): Title template
+            save_path (str, optional): Save path (GIF format)
         """
         fig, ax = plt.subplots(figsize=self.figsize)
         
-        # 確保所有圖在 CPU 上，然後轉換為 NetworkX 圖
+        # Ensure all graphs are on CPU, then convert to NetworkX
         nx_graphs = []
         for g in graph_snapshots:
             if g.device.type != 'cpu':
                 g = g.cpu()
             nx_graphs.append(dgl.to_networkx(g))
         
-        # 獲取所有圖的節點並計算固定佈局
+        # Get all nodes from all graphs and calculate fixed layout
         all_nodes = set()
         for g in nx_graphs:
             all_nodes.update(g.nodes())
         
         all_nodes = sorted(list(all_nodes))
         
-        # 計算固定佈局 (使用最後一個快照來計算佈局)
+        # Calculate fixed layout (using the last snapshot for layout)
         pos = nx.spring_layout(nx_graphs[-1], seed=42)
         
-        # 定義更新函數
+        # Define update function
         def update(frame):
             ax.clear()
             
             g = nx_graphs[frame]
             
-            # 獲取節點顏色
+            # Get node colors
             node_colors = 'skyblue'
             if node_labels_list is not None and frame < len(node_labels_list):
                 labels = node_labels_list[frame]
                 cmap = plt.cm.get_cmap('viridis', len(set(labels)))
                 node_colors = [cmap(label) for label in labels]
             
-            # 繪製節點
+            # Draw nodes
             nx.draw_networkx_nodes(
                 g, pos, 
                 node_color=node_colors, 
@@ -289,7 +289,7 @@ class NetworkVisualizer:
                 ax=ax
             )
             
-            # 繪製邊
+            # Draw edges
             nx.draw_networkx_edges(
                 g, pos, 
                 width=1.0, 
@@ -300,7 +300,7 @@ class NetworkVisualizer:
                 ax=ax
             )
             
-            # 繪製標籤
+            # Draw labels
             if len(g.nodes()) < 50:
                 nx.draw_networkx_labels(
                     g, pos, 
@@ -309,19 +309,19 @@ class NetworkVisualizer:
                     ax=ax
                 )
             
-            # 設置標題
+            # Set title
             ax.set_title(title_template.format(frame), fontsize=16)
             ax.axis('off')
             
             return ax
         
-        # 建立動畫
+        # Create animation
         ani = FuncAnimation(
             fig, update, frames=len(nx_graphs), 
             interval=1000, repeat=True, blit=False
         )
         
-        # 儲存動畫
+        # Save animation
         if save_path:
             ani.save(save_path, writer='pillow', fps=1)
             logger.info(f"Dynamic graph evolution animation saved to: {save_path}")
@@ -334,40 +334,40 @@ class NetworkVisualizer:
     def plot_feature_importance(self, feature_names, importances, title=None, 
                                top_n=10, save_path=None):
         """
-        繪製特徵重要性
+        Plot feature importance
         
-        參數:
-            feature_names (list): 特徵名稱列表
-            importances (list): 特徵重要性列表
-            title (str, optional): 圖表標題
-            top_n (int): 顯示前 N 個重要特徵
-            save_path (str, optional): 儲存路徑
+        Parameters:
+            feature_names (list): Feature name list
+            importances (list): Feature importance list
+            title (str, optional): Chart title
+            top_n (int): Show top N important features
+            save_path (str, optional): Save path
             
-        返回:
-            matplotlib.figure.Figure: 圖表物件
+        Returns:
+            matplotlib.figure.Figure: Figure object
         """
         plt.figure(figsize=(10, 8))
         
-        # 創建特徵重要性 DataFrame
+        # Create feature importance DataFrame
         feature_imp = pd.DataFrame({
             'Feature': feature_names,
             'Importance': importances
         })
         
-        # 排序並選取前 N 個
+        # Sort and select top N
         feature_imp = feature_imp.sort_values('Importance', ascending=False).head(top_n)
         
-        # 繪製條形圖
+        # Draw bar chart
         sns.barplot(x='Importance', y='Feature', data=feature_imp, palette='viridis')
         
-        # 設置標題
+        # Set title
         plt.title(title or f"Top {top_n} Important Features", fontsize=16)
         plt.xlabel("Importance")
         plt.ylabel("Features")
         
         plt.tight_layout()
         
-        # 儲存圖表
+        # Save chart
         if save_path:
             plt.savefig(save_path, bbox_inches='tight')
             logger.info(f"Feature importance chart saved to: {save_path}")
@@ -377,17 +377,17 @@ class NetworkVisualizer:
     def plot_real_time_detection(self, times, attack_probs, threshold=0.5, 
                                 window_size=100, update_interval=1, save_path=None):
         """
-        即時繪製攻擊檢測結果 (適用於互動式環境)
+        Real-time plot of attack detection results (for interactive environments)
         
-        參數:
-            times (list): 時間列表
-            attack_probs (list): 攻擊概率列表
-            threshold (float): 攻擊閾值
-            window_size (int): 顯示窗口大小
-            update_interval (float): 更新間隔 (秒)
-            save_path (str, optional): 儲存路徑
+        Parameters:
+            times (list): Time list
+            attack_probs (list): Attack probability list
+            threshold (float): Attack threshold
+            window_size (int): Display window size
+            update_interval (float): Update interval (seconds)
+            save_path (str, optional): Save path
             
-        注意: 此函數需要在支持互動式繪圖的環境中運行 (如 Jupyter Notebook)
+        Note: This function needs to be run in an environment that supports interactive plotting (e.g., Jupyter Notebook)
         """
         import matplotlib.animation as animation
         from IPython.display import display, clear_output
@@ -403,47 +403,47 @@ class NetworkVisualizer:
         plt.title('Real-time Network Attack Detection')
         plt.grid(True, alpha=0.3)
         
-        # 初始化函數
+        # Initialization function
         def init():
             line.set_data([], [])
             threshold_line.set_data([], [])
             alert_points.set_data([], [])
             return line, threshold_line, alert_points
         
-        # 更新函數
+        # Update function
         def update(frame):
-            # 獲取當前視圖範圍內的資料
+            # Get data within current view range
             start_idx = max(0, frame - window_size)
             end_idx = frame + 1
             
             current_times = times[start_idx:end_idx]
             current_probs = attack_probs[start_idx:end_idx]
             
-            # 更新線圖
+            # Update line chart
             line.set_data(current_times, current_probs)
             
-            # 更新閾值線
+            # Update threshold line
             threshold_line.set_data([current_times[0], current_times[-1]], [threshold, threshold])
             
-            # 更新警報點
+            # Update alert points
             alert_indices = [i for i, prob in enumerate(current_probs) if prob > threshold]
             alert_times = [current_times[i] for i in alert_indices]
             alert_probs = [current_probs[i] for i in alert_indices]
             alert_points.set_data(alert_times, alert_probs)
             
-            # 動態調整 x 軸範圍
+            # Dynamically adjust x-axis range
             plt.xlim(current_times[0], current_times[-1])
             plt.ylim(0, 1.05)
             
             return line, threshold_line, alert_points
         
-        # 創建動畫
+        # Create animation
         ani = animation.FuncAnimation(
             plt.gcf(), update, frames=len(times),
             init_func=init, blit=True, interval=update_interval*1000
         )
         
-        # 儲存動畫
+        # Save animation
         if save_path:
             ani.save(save_path, writer='pillow', fps=10)
             logger.info(f"Real-time detection animation saved to: {save_path}")
@@ -452,33 +452,33 @@ class NetworkVisualizer:
         
         return ani
 
-# 測試視覺化工具
+# Test visualization tool
 if __name__ == "__main__":
     import torch
     import numpy as np
     
-    # 建立一個簡單的圖
+    # Create a simple graph
     src = torch.tensor([0, 1, 2, 3, 4])
     dst = torch.tensor([1, 2, 3, 4, 0])
     g = dgl.graph((src, dst))
     
-    # 添加節點特徵
+    # Add node features
     num_nodes = 5
     in_dim = 10
     h = torch.randn(num_nodes, in_dim)
     g.ndata['h'] = h
     
-    # 創建一些標籤
+    # Create some labels
     labels = [0, 1, 0, 1, 0]
     
-    # 初始化視覺化工具
+    # Initialize visualization tool
     visualizer = NetworkVisualizer()
     
-    # 測試圖視覺化
+    # Test graph visualization
     visualizer.visualize_graph(g, node_labels=labels, title="Network Graph Visualization Test")
     
-    # 測試嵌入視覺化
-    embeddings = torch.randn(num_nodes, 16)  # 模擬節點嵌入
+    # Test embedding visualization
+    embeddings = torch.randn(num_nodes, 16)  # Simulate node embeddings
     visualizer.visualize_embeddings(
         embeddings, 
         labels, 
@@ -486,10 +486,10 @@ if __name__ == "__main__":
         title="Node Embedding Visualization Test"
     )
     
-    # 測試攻擊檢測視覺化
+    # Test attack detection visualization
     timestamps = list(range(100))
-    scores = [0.2 + 0.6 * np.sin(i/10) for i in range(100)]  # 模擬異常分數
-    attack_indices = [30, 31, 32, 60, 61, 62, 63]  # 模擬已知攻擊
+    scores = [0.2 + 0.6 * np.sin(i/10) for i in range(100)]  # Simulate anomaly scores
+    attack_indices = [30, 31, 32, 60, 61, 62, 63]  # Simulate known attacks
     
     visualizer.visualize_attack_detection(
         timestamps, 
@@ -499,7 +499,7 @@ if __name__ == "__main__":
         title="Attack Detection Visualization Test"
     )
     
-    # 測試特徵重要性視覺化
+    # Test feature importance visualization
     feature_names = [f"Feature {i}" for i in range(15)]
     importances = np.random.rand(15)
     
@@ -510,5 +510,5 @@ if __name__ == "__main__":
         top_n=10
     )
     
-    # 注意: 動態圖演化和即時檢測視覺化需要互動式環境才能正常顯示
+    # Note: Dynamic graph evolution and real-time detection visualization require interactive environment
     print("Visualization tool test completed")
