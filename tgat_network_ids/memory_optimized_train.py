@@ -19,6 +19,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import numpy as np
+import dgl
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, confusion_matrix
 import logging
 from tqdm import tqdm
