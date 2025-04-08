@@ -1,0 +1,90 @@
+# 記憶體優化版 TGAT 網路攻擊檢測系統配置文件
+
+# 資料相關配置
+data:
+  path: "./data"                  # 資料集路徑
+  test_size: 0.2                  # 測試集比例
+  random_state: 42                # 隨機種子
+  batch_size: 128                 # 批次大小
+  
+  # 記憶體優化相關配置
+  use_memory_mapping: true        # 是否使用記憶體映射
+  save_preprocessed: true         # 是否保存預處理後的資料
+  preprocessed_path: "./preprocessed_data"  # 預處理資料保存路徑
+  incremental_loading: true       # 是否使用增量式資料加載
+  chunk_size_mb: 100              # 增量加載的塊大小 (MB)
+  use_compression: true           # 是否使用資料壓縮
+  compression_format: "gzip"      # 壓縮格式 (gzip, bz2, xz, zip)
+
+# 圖結構相關配置
+graph:
+  temporal_window: 300            # 時間窗口大小（秒）
+  
+  # 記憶體優化相關配置
+  use_subgraph_sampling: true     # 是否使用子圖採樣
+  max_nodes_per_subgraph: 5000    # 子圖節點數量上限
+  max_edges_per_subgraph: 10000   # 子圖邊數量上限
+  use_sparse_representation: true # 是否使用稀疏表示
+  edge_batch_size: 5000           # 邊批次處理大小
+  prune_inactive_nodes: true      # 是否定期清理不活躍節點
+  inactive_threshold: 1800        # 節點不活躍閾值（秒）
+
+# 模型相關配置
+model:
+  hidden_dim: 64                  # 隱藏層維度
+  out_dim: 64                     # 輸出層維度
+  time_dim: 16                    # 時間編碼維度
+  num_layers: 2                   # 層數
+  num_heads: 4                    # 注意力頭數
+  dropout: 0.1                    # 丟棄率
+  
+  # 記憶體優化相關配置
+  use_mixed_precision: true       # 是否使用混合精度訓練
+  use_gradient_accumulation: true # 是否使用梯度累積
+  gradient_accumulation_steps: 4  # 梯度累積步數
+  use_gradient_checkpointing: true # 是否使用梯度檢查點
+
+# 訓練相關配置
+train:
+  lr: 0.001                       # 學習率
+  weight_decay: 1e-5              # 權重衰減係數
+  epochs: 100                     # 訓練輪數
+  patience: 10                    # 早停耐心值
+  batch_size: 128                 # 訓練批次大小
+  
+  # 記憶體優化相關配置
+  use_dynamic_batch_size: true    # 是否使用動態批次大小
+  memory_threshold: 0.8           # 記憶體使用率閾值
+  use_progressive_training: true  # 是否使用漸進式訓練
+  progressive_training_initial_ratio: 0.3  # 漸進式訓練的初始比例
+  progressive_training_growth_rate: 0.1    # 漸進式訓練的增長率
+
+# 檢測相關配置
+detection:
+  threshold: 0.7                  # 攻擊檢測閾值
+  window_size: 50                 # 檢測窗口大小
+  use_sliding_window: true        # 是否使用滑動窗口
+  sliding_window_size: 100        # 滑動窗口大小
+  sliding_window_step: 50         # 滑動窗口步長
+
+# 輸出相關配置
+output:
+  model_dir: "./models_memory_optimized"           # 模型儲存路徑
+  result_dir: "./results_memory_optimized"         # 結果儲存路徑
+  visualization_dir: "./visualizations_memory_optimized"  # 視覺化儲存路徑
+  memory_report_dir: "./memory_reports"            # 記憶體報告儲存路徑
+  checkpoint_dir: "./checkpoints_memory_optimized" # 檢查點儲存路徑
+
+# 系統相關配置
+system:
+  seed: 42                        # 隨機種子
+  device: "cuda"                  # 計算裝置 (cuda 或 cpu)
+  gpu_id: 0                       # GPU ID
+  num_workers: 4                  # 資料加載工作線程數
+  pin_memory: true                # 是否使用固定記憶體
+  
+  # 記憶體優化相關配置
+  monitor_memory: true            # 是否監控記憶體使用
+  memory_monitor_interval: 10     # 記憶體監控間隔（秒）
+  clean_memory_interval: 5        # 記憶體清理間隔（批次）
+  limit_gpu_memory: 0             # GPU 記憶體限制 (MB)，0 表示不限制
