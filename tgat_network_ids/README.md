@@ -1,101 +1,111 @@
-# Memory-Optimized TGAT for Network Intrusion Detection
+# TGAT Network Intrusion Detection System
 
-This repository contains a memory-optimized implementation of Temporal Graph Attention Network (TGAT) for network intrusion detection. The system analyzes network traffic data to detect potential attacks using graph-based deep learning techniques.
-
-## Memory Optimization Features
-
-The implementation includes various memory optimization techniques to reduce memory usage during training and inference:
-
-1. **Data Loading and Preprocessing Optimizations**
-   - Incremental data loading: Load large datasets in chunks
-   - Memory mapping: Use disk as virtual memory
-   - Data compression: Reduce memory footprint
-   - Preprocessed data caching: Avoid redundant computations
-
-2. **Graph Structure Optimizations**
-   - Subgraph sampling: Limit the number of nodes and edges
-   - Sparse representation: Reduce memory usage
-   - Batch processing of edges: Add edges in batches
-   - Periodic pruning of inactive nodes: Free up memory
-
-3. **Model Training Optimizations**
-   - Mixed precision training: Use FP16 instead of FP32
-   - Gradient accumulation: Reduce batch size
-   - Gradient checkpointing: Reduce memory usage of intermediate activations
-   - Dynamic batch sizing: Adjust batch size based on memory usage
-   - Progressive training: Start with small dataset and gradually increase
-
-4. **Active Memory Management**
-   - Memory usage monitoring: Monitor memory usage in real-time
-   - Active garbage collection: Periodically clean up unused memory
-   - GPU memory optimization: Clear CUDA cache
+This project implements a Temporal Graph Attention Network (TGAT) for network intrusion detection. The system uses graph neural networks to model network traffic and detect anomalous patterns that may indicate attacks.
 
 ## Project Structure
 
-- `memory_utils.py`: Memory optimization utility module
-- `memory_optimized_data_loader.py`: Memory-optimized data loading and preprocessing module
-- `memory_optimized_graph_builder.py`: Memory-optimized dynamic graph structure building module
-- `memory_optimized_train.py`: Memory-optimized model training and evaluation module
-- `memory_optimized_main.py`: Memory-optimized main program
-- `memory_optimized_config.yaml`: Memory-optimized configuration file
-
-## Requirements
-
-The project requires the following dependencies:
-
 ```
-torch>=1.7.0
-dgl>=0.6.0
-numpy>=1.19.0
-pandas>=1.1.0
-scikit-learn>=0.23.0
-matplotlib>=3.3.0
-seaborn>=0.11.0
-pyyaml>=5.3.0
-tqdm>=4.48.0
-psutil>=5.7.0
+tgat_network_ids/
+├── config/                  # Configuration files
+│   └── memory_optimized_config.yaml
+├── legacy_code/             # Original implementation (for reference)
+├── scripts/                 # Scripts for running the system
+│   ├── run.py               # Main script to run the system
+│   └── run_memory_optimized.sh
+├── src/                     # Source code
+│   ├── data/                # Data loading and processing
+│   │   ├── memory_optimized_data_loader.py
+│   │   └── memory_optimized_graph_builder.py
+│   ├── models/              # Model implementations
+│   │   ├── memory_optimized_train.py
+│   │   └── tgat_model.py
+│   ├── utils/               # Utility functions
+│   │   └── memory_utils.py
+│   ├── visualization/       # Visualization tools
+│   │   └── visualization.py
+│   └── memory_optimized_main.py
+├── SQL/                     # SQL-related files
+├── README.md                # This file
+└── requirements.txt         # Dependencies
+```
+
+## Memory Optimization Features
+
+This implementation includes several memory optimization techniques:
+
+1. **Incremental Data Loading**: Load data in chunks to reduce memory usage
+2. **Memory-Mapped Large Datasets**: Use memory mapping for large datasets
+3. **Subgraph Sampling**: Sample subgraphs for training to reduce memory usage
+4. **Mixed Precision Training**: Use lower precision for training to reduce memory usage
+5. **Gradient Accumulation**: Accumulate gradients over multiple batches
+6. **Dynamic Batch Size**: Adjust batch size based on available memory
+7. **Active Memory Management**: Actively manage memory usage during training
+
+## Installation
+
+```bash
+pip install -r requirements.txt
 ```
 
 ## Usage
 
-1. **Configure the System**
-   - Edit the `memory_optimized_config.yaml` file to adjust parameters according to your needs
-   - Pay special attention to memory optimization related configuration options
+### Running the System
 
-2. **Run the System**
-   - Training mode:
-     ```
-     python memory_optimized_main.py --mode train --data_path YOUR_DATA_PATH --visualize --monitor_memory
-     ```
-   
-   - Testing mode:
-     ```
-     python memory_optimized_main.py --mode test --model_path YOUR_MODEL_PATH --data_path YOUR_DATA_PATH --visualize
-     ```
-   
-   - Detection mode:
-     ```
-     python memory_optimized_main.py --mode detect --model_path YOUR_MODEL_PATH --data_path YOUR_DATA_PATH --visualize
-     ```
+```bash
+# Using the run script
+python scripts/run.py --config config/memory_optimized_config.yaml --mode train --data_path ./data/your_data --visualize --monitor_memory
 
-3. **Monitor Memory Usage**
-   - Use the `--monitor_memory` parameter to enable memory monitoring
-   - Memory usage reports will be saved in the `memory_reports` directory
+# Or using the shell script
+./scripts/run_memory_optimized.sh
+```
 
-## Configuration Options
+### Configuration
 
-The `memory_optimized_config.yaml` file contains various configuration options for the system. Key memory optimization parameters include:
+Edit `config/memory_optimized_config.yaml` to configure the system:
 
-- `data.use_memory_mapping`: Enable memory mapping for large datasets
-- `data.incremental_loading`: Enable incremental data loading
-- `graph.use_subgraph_sampling`: Enable subgraph sampling
-- `model.use_mixed_precision`: Enable mixed precision training
-- `model.use_gradient_accumulation`: Enable gradient accumulation
-- `model.use_gradient_checkpointing`: Enable gradient checkpointing
-- `train.use_dynamic_batch_size`: Enable dynamic batch sizing
-- `train.use_progressive_training`: Enable progressive training
-- `system.monitor_memory`: Enable memory usage monitoring
+```yaml
+# Data configuration
+data:
+  path: ./data/your_data
+  test_size: 0.2
+  random_state: 42
+  batch_size: 128
+
+# Model configuration
+model:
+  hidden_dim: 64
+  out_dim: 64
+  time_dim: 16
+  num_layers: 2
+  num_heads: 4
+  dropout: 0.1
+  use_mixed_precision: true
+  use_gradient_accumulation: true
+  gradient_accumulation_steps: 4
+  use_gradient_checkpointing: true
+
+# Training configuration
+train:
+  lr: 0.001
+  weight_decay: 1e-5
+  epochs: 100
+  patience: 10
+  batch_size: 128
+  use_dynamic_batch_size: true
+  memory_threshold: 0.8
+  use_progressive_training: true
+  progressive_training_initial_ratio: 0.3
+  progressive_training_growth_rate: 0.1
+
+# Output configuration
+output:
+  model_dir: ./models
+  result_dir: ./results
+  visualization_dir: ./visualizations
+  memory_report_dir: ./memory_reports
+  checkpoint_dir: ./checkpoints
+```
 
 ## License
 
-This project is licensed under the MIT License - see the LICENSE file for details.
+[MIT License](LICENSE)
