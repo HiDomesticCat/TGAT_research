@@ -644,11 +644,17 @@ class MemoryOptimizedDataLoader:
             for (src_ip, dst_ip), indices in batch_pairs.items():
                 # 限制每個 IP 對處理的封包數量
                 max_packets_per_pair = 50
-                if len(indices) > max_packets_per_pair:
-                    indices = sorted(indices, key=lambda x: batch_df.iloc[x - start_idx][time_col])[:max_packets_per_pair]
+                
+                # 確保索引在當前批次範圍內
+                # 注意：batch_pairs.indices 返回的是相對於當前批次的索引，需要轉換為全局索引
+                global_indices = [idx + start_idx for idx in indices]
+                
+                if len(global_indices) > max_packets_per_pair:
+                    # 使用全局 DataFrame 進行排序，避免索引超出範圍
+                    global_indices = sorted(global_indices, key=lambda x: self.df.iloc[x][time_col])[:max_packets_per_pair]
                 
                 # 添加到 IP 對列表
-                ip_pairs.append((src_ip, dst_ip, indices))
+                ip_pairs.append((src_ip, dst_ip, global_indices))
             
             # 清理記憶體
             del batch_df
