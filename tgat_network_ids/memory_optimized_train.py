@@ -75,7 +75,9 @@ class MemoryOptimizedTGATTrainer:
         
         # 訓練參數
         self.lr = train_config.get('lr', 0.001)
-        self.weight_decay = train_config.get('weight_decay', 1e-5)
+        # 確保 weight_decay 是浮點數
+        weight_decay_str = train_config.get('weight_decay', 1e-5)
+        self.weight_decay = float(weight_decay_str) if isinstance(weight_decay_str, str) else weight_decay_str
         self.batch_size = train_config.get('batch_size', 128)
         self.use_dynamic_batch_size = train_config.get('use_dynamic_batch_size', True)
         self.memory_threshold = train_config.get('memory_threshold', 0.8)
