@@ -632,4 +632,19 @@ class MemoryOptimizedDynamicNetworkGraph:
                     edge_feats.append(edge_feat)
                     
                     # 如果啟用子圖採樣且邊數量超過限制，提前結束
-                    if self.use_subgraph_sampling and len(src_nodes) >= self.max_edges
+                    if self.use_subgraph_sampling and len(src_nodes) >= self.max_edges_per_subgraph:
+                        logger.info(f"邊數量達到限制 {self.max_edges_per_subgraph}，提前結束邊生成")
+                        break
+            
+            # 如果達到邊數量限制，提前結束外層循環
+            if self.use_subgraph_sampling and len(src_nodes) >= self.max_edges_per_subgraph:
+                break
+        
+        # 添加生成的邊
+        if src_nodes:
+            self.add_edges_in_batches(src_nodes, dst_nodes, edge_timestamps, edge_feats)
+        
+        # 更新時間圖
+        self.update_temporal_graph()
+        
+        return self.temporal_g
