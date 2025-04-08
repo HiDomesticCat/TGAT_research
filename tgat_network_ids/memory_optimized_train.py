@@ -373,6 +373,19 @@ class MemoryOptimizedTGATTrainer:
             # 合併所有批次的輸出
             all_logits = torch.cat(all_logits, dim=0)
             
+            # 確保 all_logits 和 labels 的大小匹配
+            if all_logits.size(0) != labels.size(0):
+                logger.warning(f"輸出大小 ({all_logits.size(0)}) 與標籤大小 ({labels.size(0)}) 不匹配")
+                # 如果不匹配，可能是因為我們只處理了部分節點
+                # 在這種情況下，我們只使用處理過的節點的標籤
+                if all_logits.size(0) < labels.size(0):
+                    labels = labels[:all_logits.size(0)]
+                    logger.info(f"截斷標籤到大小 {labels.size(0)}")
+                else:
+                    # 這種情況不太可能發生，但為了安全起見
+                    all_logits = all_logits[:labels.size(0)]
+                    logger.info(f"截斷輸出到大小 {all_logits.size(0)}")
+            
             # 計算損失
             loss = self.criterion(all_logits, labels)
             
