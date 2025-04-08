@@ -652,6 +652,48 @@ class MemoryOptimizedTGATTrainer:
         
         logger.info(f"已載入檢查點: {checkpoint_path}")
     
+    def plot_confusion_matrix(self, graph, labels, class_names=None, save_path=None):
+        """
+        繪製混淆矩陣
+        
+        參數:
+            graph (dgl.DGLGraph): 評估圖
+            labels (torch.Tensor): 節點標籤
+            class_names (list, optional): 類別名稱
+            save_path (str, optional): 圖表儲存路徑
+        """
+        # 評估模型獲取預測結果
+        _, _, metrics = self.evaluate(graph, labels, class_names)
+        
+        # 獲取混淆矩陣
+        cm = metrics.get('confusion_matrix')
+        if cm is None:
+            logger.warning("無法繪製混淆矩陣：評估指標中沒有混淆矩陣")
+            return
+        
+        # 繪製混淆矩陣
+        plt.figure(figsize=(10, 8))
+        
+        # 使用 seaborn 繪製更美觀的混淆矩陣
+        if class_names:
+            sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', 
+                        xticklabels=class_names, yticklabels=class_names)
+        else:
+            sns.heatmap(cm, annot=True, fmt='d', cmap='Blues')
+        
+        plt.xlabel('預測標籤')
+        plt.ylabel('真實標籤')
+        plt.title('混淆矩陣')
+        plt.tight_layout()
+        
+        # 保存圖表
+        if save_path:
+            os.makedirs(os.path.dirname(save_path), exist_ok=True)
+            plt.savefig(save_path)
+            logger.info(f"混淆矩陣圖表已保存至: {save_path}")
+        
+        plt.show()
+    
     def plot_training_history(self, save_path=None):
         """
         繪製訓練歷史紀錄
