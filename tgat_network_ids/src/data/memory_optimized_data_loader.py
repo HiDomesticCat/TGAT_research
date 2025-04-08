@@ -608,16 +608,142 @@ class MemoryOptimizedDataLoader:
         
         edges = []
         
+        # 檢查是否有必要的列
+        required_cols = ['Source IP', 'Src IP', 'Destination IP', 'Dst IP', 'Timestamp', 'Flow Start Time']
+        if not any(col in self.df.columns for col in required_cols):
+            logger.warning("資料集中缺少必要的 IP 或時間戳記欄位，無法建立時間性邊")
+            return None
+        
         # 獲取原始 IP 和時間戳記欄位
         ip_src_col = 'Source IP' if 'Source IP' in self.df.columns else 'Src IP'
         ip_dst_col = 'Destination IP' if 'Destination IP' in self.df.columns else 'Dst IP'
         time_col = 'Timestamp' if 'Timestamp' in self.df.columns else 'Flow Start Time'
         
+        # 檢查必要的列是否存在
+        if ip_src_col not in self.df.columns or ip_dst_col not in self.df.columns or time_col not in self.df.columns:
+            logger.warning(f"資料集中缺少必要的欄位: {ip_src_col}, {ip_dst_col}, {time_col}")
+            return None
+        
         # 將時間戳記轉換為數值
-        if isinstance(self.df[time_col].iloc[0], str):
-            self.df[time_col] = pd.to_datetime(self.df[time_col]).astype(int) / 10**9
+        try:
+            if isinstance(self.df[time_col].iloc[0], str):
+                self.df[time_col] = pd.to_datetime(self.df[time_col]).astype(int) / 10**9
+        except Exception as e:
+            logger.warning(f"時間戳記轉換失敗: {str(e)}")
+            return None
         
         # 為每個封包分配索引 (節點ID)
         node_indices = {i: i for i in range(len(self.df))}
         
-        # 根
+        # 根據 IP 位址和時間戳記建立邊
+        logger.info("建立時間性邊...")
+        
+        # 使用 IP 位址對建立邊
+        ip_pairs = {}  # (src_ip, dst_ip) -> [(src_idx, dst_idx, time, [features])]
+        
+        # 遍歷資料集建立邊
+        for i, row in tqdm(self.df.iterrows(), total=len(self.df), desc="建立邊"):
+            if len(edges) >= max_edges:
+                logger.info(f"已達到最大邊數量限制 {max_edges}，停止建立邊")
+                break
+            
+            src_ip = row[ip_src_col]
+            dst_ip = row[ip_dst_col]
+            timestamp = row[time_col]
+            
+            # 使用節點索引
+            src_idx = node_indices[i]
+            
+            # 尋找與此源 IP 相同的目標節點
+            for j, other_row in self.df.iterrows():
+                if j == i:  # 跳過自己
+                    continue
+                
+                if other_row[ip_src_col] == dst_ip:
+                    dst_idx = node_indices[j]
+                    
+                    # 計算時間差
+                    time_diff = abs(timestamp - other_row[time_col])
+                    
+                    # 如果時間差小於閾值，建立邊
+                    if time_diff < 60:  # 60秒內的連接
+                        # 邊特徵: 時間差、封包大小比例等
+                        if 'Flow Bytes/s' in self.df.columns and 'Flow Packets/s' in self.df.columns:
+                            bytes_ratio = row['Flow Bytes/s'] / (other_row['Flow Bytes/s'] + 1e-8)
+                            packets_ratio = row['Flow Packets/s'] / (other_row['Flow Packets/s'] + 1e-8)
+                            edge_feat = [time_diff, bytes_ratio, packets_ratio]
+                        else:
+                            edge_feat = [time_diff, 0.0, 0.0]
+                        
+                        # 添加邊
+                        edges.append((src_idx, dst_idx, timestamp, edge_feat))
+                        
+                        # 如果達到最大邊數量，提前結束
+                        if len(edges) >= max_edges:
+                            break
+            
+            # 定期清理記憶體
+            if i % 1000 == 0:
+                clean_memory()
+        
+        logger.info(f"建立了 {len(edges)} 條時間性邊")
+        
+        # 如果沒有邊，嘗試使用時間接近的節點建立邊
+        if not edges:
+            logger.warning("未能基於 IP 位址建立邊，嘗試使用時間接近的節點建立邊")
+            
+            # 按時間排序節點
+            sorted_indices = self.df[time_col].argsort()
+            
+            # 遍歷排序後的節點，連接時間接近的節點
+            for i in range(len(sorted_indices) - 1):
+                if len(edges) >= max_edges:
+                    break
+                
+                idx1 = sorted_indices[i]
+                idx2 = sorted_indices[i + 1]
+                
+                time1 = self.df.iloc[idx1][time_col]
+                time2 = self.df.iloc[idx2][time_col]
+                
+                # 計算時間差
+                time_diff = abs(time2 - time1)
+                
+                # 如果時間差小於閾值，建立邊
+                if time_diff < 10:  # 10秒內的連接
+                    # 邊特徵: 時間差
+                    edge_feat = [time_diff, 0.0, 0.0]
+                    
+                    # 添加邊
+                    edges.append((node_indices[idx1], node_indices[idx2], max(time1, time2), edge_feat))
+            
+            logger.info(f"基於時間接近建立了 {len(edges)} 條邊")
+        
+        # 如果仍然沒有邊，創建一些隨機邊以確保圖是連通的
+        if not edges:
+            logger.warning("未能建立任何邊，創建隨機邊以確保圖是連通的")
+            
+            # 隨機選擇節點建立邊
+            import random
+            random.seed(42)  # 設置隨機種子以確保可重複性
+            
+            num_nodes = len(self.df)
+            num_edges = min(max_edges, num_nodes * 2)  # 每個節點平均 2 條邊
+            
+            for _ in range(num_edges):
+                src_idx = random.randint(0, num_nodes - 1)
+                dst_idx = random.randint(0, num_nodes - 1)
+                
+                if src_idx != dst_idx:  # 避免自環
+                    # 使用平均時間戳記
+                    timestamp = self.df[time_col].mean()
+                    
+                    # 邊特徵: 隨機值
+                    edge_feat = [random.random(), random.random(), random.random()]
+                    
+                    # 添加邊
+                    edges.append((node_indices[src_idx], node_indices[dst_idx], timestamp, edge_feat))
+            
+            logger.info(f"創建了 {len(edges)} 條隨機邊")
+        
+        return edges
