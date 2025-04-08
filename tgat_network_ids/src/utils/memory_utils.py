@@ -2,17 +2,14 @@
 # -*- coding: utf-8 -*-
 
 """
-記憶體優化工具模組 (Enhanced Version)
+記憶體優化工具模組
 
-此模組提供全面的記憶體優化相關工具函數，包括：
+此模組提供記憶體優化相關工具函數，包括：
 1. 記憶體使用監控與分析
 2. 記憶體映射文件操作
 3. 主動記憶體管理與釋放
 4. GPU 記憶體優化與控制
-5. 記憶體使用報告生成與視覺化
-6. 自適應記憶體管理策略
-7. 記憶體洩漏檢測
-8. 記憶體使用優化建議
+5. 記憶體使用報告生成
 """
 
 import os
@@ -20,13 +17,10 @@ import gc
 import time
 import psutil
 import numpy as np
-import pandas as pd
 import torch
 import logging
-import weakref
 import json
 import tracemalloc
-import sys
 from datetime import datetime
 import matplotlib.pyplot as plt
 from functools import wraps
@@ -50,8 +44,7 @@ class MemoryMonitor:
     """
     
     def __init__(self, interval: int = 10, report_dir: str = './memory_reports', 
-                 enable_gpu: bool = True, detailed_monitoring: bool = False,
-                 alert_threshold: float = 90.0):
+                 enable_gpu: bool = True, alert_threshold: float = 90.0):
         """
         初始化記憶體監控器
         
@@ -59,13 +52,11 @@ class MemoryMonitor:
             interval (int): 監控間隔（秒）
             report_dir (str): 報告保存目錄
             enable_gpu (bool): 是否監控 GPU 記憶體
-            detailed_monitoring (bool): 是否啟用詳細監控（包括進程和系統級別）
             alert_threshold (float): 記憶體使用率警告閾值（百分比）
         """
         self.interval = interval
         self.report_dir = report_dir
         self.enable_gpu = enable_gpu and torch.cuda.is_available()
-        self.detailed_monitoring = detailed_monitoring
         self.alert_threshold = alert_threshold
         self.monitoring = False
         self.memory_usage = []
@@ -80,9 +71,8 @@ class MemoryMonitor:
         if not os.path.exists(report_dir):
             os.makedirs(report_dir)
         
-        # 初始化 tracemalloc 用於詳細監控
-        if detailed_monitoring:
-            tracemalloc.start()
+        # 初始化 tracemalloc
+        tracemalloc.start()
     
     def start(self):
         """
@@ -131,9 +121,8 @@ class MemoryMonitor:
         # 生成報告
         self.generate_report()
         
-        # 如果啟用了詳細監控，停止 tracemalloc
-        if self.detailed_monitoring:
-            tracemalloc.stop()
+        # 停止 tracemalloc
+        tracemalloc.stop()
     
     def _monitor_loop(self):
         """
@@ -182,8 +171,7 @@ class MemoryMonitor:
                     logger.info(f"當前 GPU 記憶體使用: {gpu_usage:.2f} MB (峰值: {self.peak_gpu_memory:.2f} MB)")
                 
                 # 詳細監控
-                if self.detailed_monitoring:
-                    self._log_detailed_memory_usage()
+                self._log_detailed_memory_usage()
             
             # 等待下一次監控
             time.sleep(self.interval)
@@ -226,7 +214,6 @@ class MemoryMonitor:
         
         try:
             allocated = torch.cuda.memory_allocated() / (1024 * 1024)  # 轉換為 MB
-            reserved = torch.cuda.memory_reserved() / (1024 * 1024)  # 轉換為 MB
             return allocated
         except:
             return 0
@@ -305,10 +292,10 @@ class MemoryMonitor:
         
         logger.info(f"記憶體使用報告已保存至: {report_file}")
         
-        # Draw memory usage charts (in English)
+        # 繪製記憶體使用圖表
         plt.figure(figsize=(12, 8))
         
-        # CPU memory usage
+        # CPU 記憶體使用
         plt.subplot(2, 1, 1)
         plt.plot(self.timestamps, self.memory_usage, label='Process Memory Usage')
         plt.axhline(y=self.peak_memory, color='r', linestyle='--', label=f'Peak: {self.peak_memory:.2f} MB')
@@ -318,7 +305,7 @@ class MemoryMonitor:
         plt.grid(True)
         plt.legend()
         
-        # System memory usage percentage
+        # 系統記憶體使用率
         plt.subplot(2, 1, 2)
         system_percents = [m['percent'] for m in self.system_memory_usage]
         plt.plot(self.timestamps, system_percents, label='System Memory Usage', color='green')
@@ -332,7 +319,7 @@ class MemoryMonitor:
         plt.tight_layout()
         plt.savefig(plot_file)
         
-        # If GPU data is available, draw GPU memory usage chart
+        # 如果有 GPU 數據，繪製 GPU 記憶體使用圖表
         if self.enable_gpu and self.gpu_memory_usage:
             gpu_plot_file = os.path.join(self.report_dir, f"gpu_memory_plot_{timestamp}.png")
             plt.figure(figsize=(12, 6))
@@ -345,9 +332,9 @@ class MemoryMonitor:
             plt.legend()
             plt.tight_layout()
             plt.savefig(gpu_plot_file)
-            logger.info(f"GPU memory usage chart saved to: {gpu_plot_file}")
+            logger.info(f"GPU 記憶體使用圖表已保存至: {gpu_plot_file}")
         
-        logger.info(f"Memory usage charts saved to: {plot_file}")
+        logger.info(f"記憶體使用圖表已保存至: {plot_file}")
         
         # 返回報告摘要
         summary = {
@@ -374,8 +361,7 @@ class MemoryMonitor:
         return summary
 
 def get_memory_monitor(interval: int = 10, report_dir: str = './memory_reports', 
-                      enable_gpu: bool = True, detailed_monitoring: bool = False,
-                      alert_threshold: float = 90.0) -> MemoryMonitor:
+                      enable_gpu: bool = True, alert_threshold: float = 90.0) -> MemoryMonitor:
     """
     獲取記憶體監控器實例（單例模式）
     
@@ -383,7 +369,6 @@ def get_memory_monitor(interval: int = 10, report_dir: str = './memory_reports',
         interval (int): 監控間隔（秒）
         report_dir (str): 報告保存目錄
         enable_gpu (bool): 是否監控 GPU 記憶體
-        detailed_monitoring (bool): 是否啟用詳細監控
         alert_threshold (float): 記憶體使用率警告閾值（百分比）
         
     返回:
@@ -396,7 +381,6 @@ def get_memory_monitor(interval: int = 10, report_dir: str = './memory_reports',
             interval=interval,
             report_dir=report_dir,
             enable_gpu=enable_gpu,
-            detailed_monitoring=detailed_monitoring,
             alert_threshold=alert_threshold
         )
     
@@ -462,282 +446,8 @@ def load_memory_mapped_array(filename: str, mode: str = 'r') -> np.memmap:
     
     return memmap_array
 
-def save_dataframe_chunked(df: pd.DataFrame, filename: str, chunk_size: int = 10000, 
-                          compression: Optional[str] = None, index: bool = False) -> None:
-    """
-    分塊保存 DataFrame 到 CSV 文件
-    
-    將大型 DataFrame 分塊保存，減少內存使用。
-    
-    參數:
-        df (pd.DataFrame): 數據框
-        filename (str): 文件名
-        chunk_size (int): 每塊的行數
-        compression (Optional[str]): 壓縮格式，如 'gzip', 'bz2', 'xz', 'zip'
-        index (bool): 是否保存索引
-    """
-    # 確保目錄存在
-    os.makedirs(os.path.dirname(os.path.abspath(filename)), exist_ok=True)
-    
-    # 計算塊數
-    n_chunks = (len(df) + chunk_size - 1) // chunk_size
-    
-    logger.info(f"分塊保存 DataFrame: {filename}, 總行數: {len(df)}, 塊大小: {chunk_size}, 塊數: {n_chunks}")
-    
-    # 分塊保存
-    for i in range(n_chunks):
-        start_idx = i * chunk_size
-        end_idx = min((i + 1) * chunk_size, len(df))
-        
-        chunk = df.iloc[start_idx:end_idx]
-        
-        # 第一塊包含表頭，後續塊不包含
-        header = i == 0
-        mode = 'w' if i == 0 else 'a'
-        
-        chunk.to_csv(filename, mode=mode, header=header, index=index, compression=compression)
-        
-        # 釋放記憶體
-        del chunk
-        gc.collect()
-        
-        logger.info(f"已保存塊 {i+1}/{n_chunks}, 行數: {end_idx - start_idx}")
-
-def load_dataframe_chunked(filename: str, chunk_size: int = 10000, 
-                          compression: Optional[str] = None, dtype: Optional[Dict] = None,
-                          optimize_memory: bool = True) -> pd.DataFrame:
-    """
-    分塊加載 CSV 文件到 DataFrame
-    
-    分塊加載大型 CSV 文件，減少內存使用。
-    
-    參數:
-        filename (str): 文件名
-        chunk_size (int): 每塊的行數
-        compression (Optional[str]): 壓縮格式，如 'gzip', 'bz2', 'xz', 'zip'
-        dtype (Optional[Dict]): 列數據類型
-        optimize_memory (bool): 是否優化記憶體使用
-        
-    返回:
-        pd.DataFrame: 合併後的數據框
-    """
-    logger.info(f"分塊加載 DataFrame: {filename}, 塊大小: {chunk_size}")
-    
-    # 使用 pandas 的 chunked 讀取
-    chunks = []
-    total_rows = 0
-    
-    for i, chunk in enumerate(pd.read_csv(filename, chunksize=chunk_size, 
-                                         compression=compression, dtype=dtype, 
-                                         low_memory=False)):
-        # 優化記憶體使用
-        if optimize_memory:
-            chunk = optimize_dataframe_memory(chunk, verbose=False)
-        
-        chunks.append(chunk)
-        total_rows += len(chunk)
-        logger.info(f"已加載塊 {i+1}，行數: {len(chunk)}, 總行數: {total_rows}")
-        
-        # 定期清理記憶體
-        if (i + 1) % 5 == 0:
-            clean_memory()
-    
-    # 合併所有塊
-    logger.info(f"合併 {len(chunks)} 個數據塊...")
-    df = pd.concat(chunks, ignore_index=True)
-    
-    # 釋放記憶體
-    del chunks
-    clean_memory()
-    
-    logger.info(f"完成加載，總行數: {len(df)}")
-    
-    return df
-
-def optimize_dataframe_memory(df: pd.DataFrame, category_threshold: int = 50, 
-                             verbose: bool = True, deep_optimization: bool = False) -> pd.DataFrame:
-    """
-    優化 DataFrame 記憶體使用
-    
-    通過選擇最佳數據類型和轉換為分類類型來減少 DataFrame 的記憶體使用。
-    
-    參數:
-        df (pd.DataFrame): 數據框
-        category_threshold (int): 唯一值數量閾值，低於此值的列將轉換為分類類型
-        verbose (bool): 是否輸出詳細信息
-        deep_optimization (bool): 是否進行深度優化（更積極的類型轉換）
-        
-    返回:
-        pd.DataFrame: 優化後的數據框
-    """
-    start_mem = df.memory_usage(deep=True).sum() / (1024 * 1024)
-    if verbose:
-        logger.info(f"原始 DataFrame 記憶體使用: {start_mem:.2f} MB")
-    
-    # 複製 DataFrame 以避免修改原始數據
-    df_optimized = df.copy()
-    
-    # 遍歷所有列
-    for col in df_optimized.columns:
-        # 獲取列數據類型
-        col_type = df_optimized[col].dtype
-        
-        # 數值類型優化
-        if pd.api.types.is_integer_dtype(col_type):
-            # 檢查值範圍
-            col_min = df_optimized[col].min()
-            col_max = df_optimized[col].max()
-            
-            # 根據值範圍選擇最小的數據類型
-            if col_min >= 0:
-                if col_max < 2**8:
-                    df_optimized[col] = df_optimized[col].astype(np.uint8)
-                elif col_max < 2**16:
-                    df_optimized[col] = df_optimized[col].astype(np.uint16)
-                elif col_max < 2**32:
-                    df_optimized[col] = df_optimized[col].astype(np.uint32)
-            else:
-                if col_min > -2**7 and col_max < 2**7:
-                    df_optimized[col] = df_optimized[col].astype(np.int8)
-                elif col_min > -2**15 and col_max < 2**15:
-                    df_optimized[col] = df_optimized[col].astype(np.int16)
-                elif col_min > -2**31 and col_max < 2**31:
-                    df_optimized[col] = df_optimized[col].astype(np.int32)
-        
-        # 浮點類型優化
-        elif pd.api.types.is_float_dtype(col_type):
-            # 檢查是否可以轉換為較小的浮點類型
-            if deep_optimization:
-                # 檢查值範圍，決定是否可以使用 float16
-                col_min = df_optimized[col].min()
-                col_max = df_optimized[col].max()
-                
-                # float16 範圍約為 ±65504
-                if col_min > -65504 and col_max < 65504:
-                    df_optimized[col] = df_optimized[col].astype(np.float16)
-                else:
-                    df_optimized[col] = df_optimized[col].astype(np.float32)
-            else:
-                # 標準優化：使用 float32 代替 float64
-                df_optimized[col] = df_optimized[col].astype(np.float32)
-        
-        # 字符串類型優化
-        elif col_type == object:
-            # 檢查是否可以轉換為分類類型
-            n_unique = df_optimized[col].nunique()
-            if n_unique < category_threshold:
-                df_optimized[col] = df_optimized[col].astype('category')
-            elif deep_optimization:
-                # 嘗試推斷更好的數據類型
-                try:
-                    # 嘗試轉換為日期時間
-                    df_optimized[col] = pd.to_datetime(df_optimized[col], errors='ignore')
-                except:
-                    pass
-    
-    # 計算優化後的記憶體使用
-    end_mem = df_optimized.memory_usage(deep=True).sum() / (1024 * 1024)
-    reduction = 100 * (start_mem - end_mem) / start_mem
-    
-    if verbose:
-        logger.info(f"優化後 DataFrame 記憶體使用: {end_mem:.2f} MB")
-        logger.info(f"記憶體減少: {reduction:.2f}%")
-    
-    return df_optimized
-
-def clean_memory(aggressive: bool = False) -> Dict[str, float]:
-    """
-    主動清理記憶體
-    
-    強制執行垃圾回收並清理未使用的記憶體。
-    
-    參數:
-        aggressive (bool): 是否進行積極的記憶體清理
-        
-    返回:
-        Dict[str, float]: 清理前後的記憶體使用信息
-    """
-    # 獲取清理前的記憶體使用
-    before = get_memory_usage()
-    
-    # 強制執行垃圾回收
-    gc.collect()
-    
-    # 如果啟用了積極清理，執行更多清理操作
-    if aggressive:
-        # 多次執行垃圾回收
-        for _ in range(3):
-            gc.collect()
-        
-        # 清理 Python 解釋器緩存
-        import sys
-        sys.exc_clear() if hasattr(sys, 'exc_clear') else None
-        
-        # 清理 numpy 緩存
-        np.clear_cache() if hasattr(np, 'clear_cache') else None
-    
-    # 如果使用 CUDA，清理 CUDA 緩存
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-        
-        # 如果啟用了積極清理，執行更多 GPU 清理操作
-        if aggressive and hasattr(torch.cuda, 'synchronize'):
-            torch.cuda.synchronize()
-    
-    # 獲取清理後的記憶體使用
-    after = get_memory_usage()
-    
-    # 計算清理效果
-    cpu_diff = before['cpu_memory_mb'] - after['cpu_memory_mb']
-    gpu_diff = before.get('gpu_memory_mb', 0) - after.get('gpu_memory_mb', 0)
-    
-    logger.info("已執行記憶體清理")
-    if cpu_diff > 0 or gpu_diff > 0:
-        logger.info(f"  釋放 CPU 記憶體: {cpu_diff:.2f} MB")
-        if torch.cuda.is_available():
-            logger.info(f"  釋放 GPU 記憶體: {gpu_diff:.2f} MB")
-    
-    return {
-        'before': before,
-        'after': after,
-        'cpu_diff': cpu_diff,
-        'gpu_diff': gpu_diff
-    }
-
-def limit_gpu_memory(limit_mb: int = 0, device: int = 0) -> None:
-    """
-    限制 GPU 記憶體使用
-    
-    參數:
-        limit_mb (int): 記憶體限制 (MB)，0 表示不限制
-        device (int): GPU 設備 ID
-    """
-    if not torch.cuda.is_available():
-        logger.warning("CUDA 不可用，無法限制 GPU 記憶體")
-        return
-    
-    if limit_mb <= 0:
-        logger.info("不限制 GPU 記憶體使用")
-        return
-    
-    try:
-        # 獲取設備總記憶體
-        total_memory = torch.cuda.get_device_properties(device).total_memory / (1024 * 1024)  # MB
-        
-        # 確保限制不超過總記憶體
-        if limit_mb > total_memory:
-            logger.warning(f"限制 ({limit_mb} MB) 超過設備總記憶體 ({total_memory:.0f} MB)，將使用 80% 的總記憶體")
-            limit_mb = int(total_memory * 0.8)
-        
-        # 設置 CUDA 記憶體分配器
-        fraction = limit_mb / total_memory
-        torch.cuda.set_per_process_memory_fraction(fraction, device)
-        logger.info(f"已限制 GPU {device} 記憶體使用: {limit_mb} MB ({fraction:.1%} 的總記憶體)")
-    except Exception as e:
-        logger.error(f"限制 GPU 記憶體時發生錯誤: {str(e)}")
-
 @contextmanager
-def track_memory_usage(name: str = "操作", detailed: bool = False) -> None:
+def track_memory_usage(name: str = "操作") -> None:
     """
     記憶體使用追蹤上下文管理器
     
@@ -745,7 +455,6 @@ def track_memory_usage(name: str = "操作", detailed: bool = False) -> None:
     
     參數:
         name (str): 操作名稱
-        detailed (bool): 是否顯示詳細信息
         
     用法:
         with track_memory_usage("數據加載"):
@@ -762,11 +471,7 @@ def track_memory_usage(name: str = "操作", detailed: bool = False) -> None:
     
     start_time = time.time()
     
-    if detailed:
-        logger.info(f"開始 {name}...")
-        logger.info(f"  初始 CPU 記憶體: {start_mem:.2f} MB")
-        if torch.cuda.is_available():
-            logger.info(f"  初始 GPU 記憶體: {start_gpu_mem:.2f} MB")
+    logger.info(f"開始 {name}...")
     
     try:
         yield
@@ -826,10 +531,8 @@ def get_memory_usage() -> Dict[str, float]:
     
     # GPU 記憶體
     gpu_mem = 0
-    gpu_mem_reserved = 0
     if torch.cuda.is_available():
         gpu_mem = torch.cuda.memory_allocated() / (1024 * 1024)
-        gpu_mem_reserved = torch.cuda.memory_reserved() / (1024 * 1024)
     
     return {
         "cpu_memory_mb": cpu_mem,
@@ -837,16 +540,12 @@ def get_memory_usage() -> Dict[str, float]:
         "system_memory_used_mb": system_mem.used / (1024 * 1024),
         "system_memory_percent": system_mem.percent,
         "gpu_memory_mb": gpu_mem,
-        "gpu_memory_reserved_mb": gpu_mem_reserved,
         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     }
 
-def print_memory_usage(detailed: bool = False) -> None:
+def print_memory_usage() -> None:
     """
     打印當前記憶體使用情況
-    
-    參數:
-        detailed (bool): 是否顯示詳細信息
     """
     mem_info = get_memory_usage()
     
@@ -856,144 +555,91 @@ def print_memory_usage(detailed: bool = False) -> None:
     
     if torch.cuda.is_available():
         logger.info(f"  GPU 記憶體: {mem_info['gpu_memory_mb']:.2f} MB (已分配)")
-        logger.info(f"  GPU 記憶體: {mem_info['gpu_memory_reserved_mb']:.2f} MB (已保留)")
-        
-        if detailed:
-            # 顯示每個 GPU 的詳細信息
-            for i in range(torch.cuda.device_count()):
-                props = torch.cuda.get_device_properties(i)
-                logger.info(f"  GPU {i} ({props.name}):")
-                logger.info(f"    總記憶體: {props.total_memory / (1024 * 1024):.2f} MB")
-                logger.info(f"    處理器數量: {props.multi_processor_count}")
-                logger.info(f"    CUDA 能力: {props.major}.{props.minor}")
 
-def get_memory_optimization_suggestions() -> List[str]:
+def clean_memory(aggressive: bool = False) -> Dict[str, float]:
     """
-    獲取記憶體優化建議
+    主動清理記憶體
     
-    根據當前系統狀態提供記憶體優化建議。
-    
-    返回:
-        List[str]: 優化建議列表
-    """
-    suggestions = []
-    
-    # 獲取記憶體使用情況
-    mem_info = get_memory_usage()
-    
-    # 系統記憶體使用率高
-    if mem_info['system_memory_percent'] > 80:
-        suggestions.append("系統記憶體使用率高 (> 80%)，建議減小批次大小或使用記憶體映射")
-        suggestions.append("考慮啟用增量式資料加載 (incremental_loading=True)")
-        suggestions.append("使用 save_preprocessed=True 保存預處理結果，避免重複計算")
-    
-    # GPU 記憶體使用高
-    if torch.cuda.is_available() and mem_info['gpu_memory_mb'] > 1000:
-        suggestions.append("GPU 記憶體使用較高 (> 1GB)，建議使用混合精度訓練 (use_mixed_precision=True)")
-        suggestions.append("啟用梯度檢查點 (use_gradient_checkpointing=True) 減少激活值記憶體使用")
-        suggestions.append("考慮使用梯度累積 (use_gradient_accumulation=True) 減少批次大小")
-    
-    # 一般建議
-    suggestions.append("使用 optimize_dataframe_memory() 優化 DataFrame 記憶體使用")
-    suggestions.append("定期調用 clean_memory() 清理未使用的記憶體")
-    suggestions.append("對大型數據集使用 memory_mapped_array() 進行記憶體映射")
-    suggestions.append("使用 track_memory_usage() 上下文管理器追蹤關鍵操作的記憶體使用")
-    
-    # 根據系統狀態添加更多建議
-    if psutil.virtual_memory().available < 2 * 1024 * 1024 * 1024:  # 小於 2GB 可用
-        suggestions.append("系統可用記憶體不足 (< 2GB)，建議關閉其他應用程序釋放記憶體")
-        suggestions.append("考慮使用更小的資料子集進行訓練")
-    
-    return suggestions
-
-def print_optimization_suggestions() -> None:
-    """打印記憶體優化建議"""
-    suggestions = get_memory_optimization_suggestions()
-    
-    logger.info("記憶體優化建議:")
-    for i, suggestion in enumerate(suggestions, 1):
-        logger.info(f"  {i}. {suggestion}")
-
-def detect_memory_leaks(iterations: int = 5, func: Optional[Callable] = None, *args, **kwargs) -> Dict[str, Any]:
-    """
-    檢測記憶體洩漏
-    
-    通過多次執行函數並監控記憶體使用變化來檢測潛在的記憶體洩漏。
+    強制執行垃圾回收並清理未使用的記憶體。
     
     參數:
-        iterations (int): 執行迭代次數
-        func (Optional[Callable]): 要測試的函數，如果為 None 則僅監控記憶體使用
-        *args, **kwargs: 傳遞給函數的參數
+        aggressive (bool): 是否進行積極的記憶體清理
         
     返回:
-        Dict[str, Any]: 記憶體洩漏檢測結果
+        Dict[str, float]: 清理前後的記憶體使用信息
     """
-    logger.info(f"開始記憶體洩漏檢測 ({iterations} 次迭代)...")
+    # 獲取清理前的記憶體使用
+    before = get_memory_usage()
     
-    # 啟用 tracemalloc
-    tracemalloc.start()
+    # 強制執行垃圾回收
+    gc.collect()
     
-    memory_usage = []
-    snapshot1 = None
+    # 如果啟用了積極清理，執行更多清理操作
+    if aggressive:
+        # 多次執行垃圾回收
+        for _ in range(3):
+            gc.collect()
     
-    # 執行多次迭代
-    for i in range(iterations):
-        # 清理記憶體
-        clean_memory(aggressive=True)
+    # 如果使用 CUDA，清理 CUDA 緩存
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
         
-        # 記錄開始時的記憶體使用
-        if i == 0:
-            snapshot1 = tracemalloc.take_snapshot()
-        
-        # 執行函數
-        if func is not None:
-            func(*args, **kwargs)
-        
-        # 記錄記憶體使用
-        memory_info = get_memory_usage()
-        memory_usage.append(memory_info['cpu_memory_mb'])
-        
-        logger.info(f"  迭代 {i+1}/{iterations}: {memory_info['cpu_memory_mb']:.2f} MB")
+        # 如果啟用了積極清理，執行更多 GPU 清理操作
+        if aggressive and hasattr(torch.cuda, 'synchronize'):
+            torch.cuda.synchronize()
     
-    # 獲取最終快照
-    snapshot2 = tracemalloc.take_snapshot()
+    # 獲取清理後的記憶體使用
+    after = get_memory_usage()
     
-    # 停止 tracemalloc
-    tracemalloc.stop()
+    # 計算清理效果
+    cpu_diff = before['cpu_memory_mb'] - after['cpu_memory_mb']
+    gpu_diff = before.get('gpu_memory_mb', 0) - after.get('gpu_memory_mb', 0)
     
-    # 分析記憶體使用趨勢
-    memory_trend = np.polyfit(range(iterations), memory_usage, 1)[0]
+    if cpu_diff > 1 or gpu_diff > 1:  # 只在有明顯效果時記錄
+        logger.info("已執行記憶體清理")
+        if cpu_diff > 1:
+            logger.info(f"  釋放 CPU 記憶體: {cpu_diff:.2f} MB")
+        if torch.cuda.is_available() and gpu_diff > 1:
+            logger.info(f"  釋放 GPU 記憶體: {gpu_diff:.2f} MB")
     
-    # 比較快照
-    top_stats = snapshot2.compare_to(snapshot1, 'lineno')
-    
-    # 準備結果
-    result = {
-        'memory_usage': memory_usage,
-        'memory_trend': memory_trend,
-        'has_leak': memory_trend > 1.0,  # 如果每次迭代增加超過 1MB，則可能存在洩漏
-        'top_differences': []
+    return {
+        'before': before,
+        'after': after,
+        'cpu_diff': cpu_diff,
+        'gpu_diff': gpu_diff
     }
+
+def limit_gpu_memory(limit_mb: int = 0, device: int = 0) -> None:
+    """
+    限制 GPU 記憶體使用
     
-    # 記錄頂部差異
-    logger.info("記憶體分配差異 Top 10:")
-    for i, stat in enumerate(top_stats[:10], 1):
-        trace = stat.traceback.format()
-        size = stat.size / 1024  # KB
-        if size > 0:  # 只關注增加的部分
-            logger.info(f"  #{i}: {size:.1f} KB - {trace[0]}")
-            result['top_differences'].append({
-                'size_kb': size,
-                'trace': trace[0]
-            })
+    參數:
+        limit_mb (int): 記憶體限制 (MB)，0 表示不限制
+        device (int): GPU 設備 ID
+    """
+    if not torch.cuda.is_available():
+        logger.warning("CUDA 不可用，無法限制 GPU 記憶體")
+        return
     
-    # 結論
-    if result['has_leak']:
-        logger.warning(f"檢測到可能的記憶體洩漏: 每次迭代增加約 {memory_trend:.2f} MB")
-    else:
-        logger.info("未檢測到明顯的記憶體洩漏")
+    if limit_mb <= 0:
+        logger.info("不限制 GPU 記憶體使用")
+        return
     
-    return result
+    try:
+        # 獲取設備總記憶體
+        total_memory = torch.cuda.get_device_properties(device).total_memory / (1024 * 1024)  # MB
+        
+        # 確保限制不超過總記憶體
+        if limit_mb > total_memory:
+            logger.warning(f"限制 ({limit_mb} MB) 超過設備總記憶體 ({total_memory:.0f} MB)，將使用 80% 的總記憶體")
+            limit_mb = int(total_memory * 0.8)
+        
+        # 設置 CUDA 記憶體分配器
+        fraction = limit_mb / total_memory
+        torch.cuda.set_per_process_memory_fraction(fraction, device)
+        logger.info(f"已限制 GPU {device} 記憶體使用: {limit_mb} MB ({fraction:.1%} 的總記憶體)")
+    except Exception as e:
+        logger.error(f"限制 GPU 記憶體時發生錯誤: {str(e)}")
 
 def adaptive_batch_size(initial_batch_size: int, memory_threshold: float = 0.8, 
                        min_batch_size: int = 16, step_size: float = 0.5) -> int:
@@ -1041,65 +687,322 @@ def adaptive_batch_size(initial_batch_size: int, memory_threshold: float = 0.8,
         # 記憶體使用率低，可以使用初始批次大小
         return initial_batch_size
 
-# 主程式測試
-if __name__ == "__main__":
-    # 測試記憶體監控
-    monitor = MemoryMonitor(interval=1, report_dir='./test_memory_reports', detailed_monitoring=True)
-    monitor.start()
+
+def save_dataframe_chunked(df: pd.DataFrame, path: str, chunk_size: int = 10000, 
+                          compression: Optional[str] = None) -> None:
+    """
+    分塊保存 DataFrame 到 CSV 文件
     
-    # 創建一些數據以測試記憶體使用
-    data = []
-    for i in range(10):
-        # 分配一些記憶體
-        arr = np.random.randn(1000, 1000)
-        data.append(arr)
+    對於大型 DataFrame，分塊保存可以減少記憶體使用。
+    
+    參數:
+        df (pd.DataFrame): 要保存的 DataFrame
+        path (str): 保存路徑
+        chunk_size (int): 每個塊的行數
+        compression (str, optional): 壓縮格式，如 'gzip', 'bz2', 'zip' 等
+    """
+    # 確保目錄存在
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    
+    # 獲取總行數
+    total_rows = len(df)
+    
+    # 計算塊數
+    num_chunks = (total_rows + chunk_size - 1) // chunk_size
+    
+    logger.info(f"分塊保存 DataFrame 到 {path}，共 {total_rows} 行，分為 {num_chunks} 個塊")
+    
+    # 分塊保存
+    for i in range(num_chunks):
+        start_idx = i * chunk_size
+        end_idx = min((i + 1) * chunk_size, total_rows)
         
-        # 等待一秒
-        time.sleep(1)
+        # 獲取當前塊
+        chunk = df.iloc[start_idx:end_idx]
+        
+        # 保存當前塊
+        if i == 0:
+            # 第一個塊，包含表頭
+            chunk.to_csv(path, mode='w', index=False, compression=compression)
+        else:
+            # 後續塊，不包含表頭
+            chunk.to_csv(path, mode='a', header=False, index=False, compression=compression)
+        
+        logger.info(f"已保存塊 {i+1}/{num_chunks}，行 {start_idx} 到 {end_idx-1}")
+        
+        # 定期清理記憶體
+        if (i + 1) % 5 == 0:
+            clean_memory()
+
+
+def load_dataframe_chunked(path: str, chunk_size: int = 10000, 
+                          dtype: Optional[Dict] = None, 
+                          compression: Optional[str] = None) -> pd.DataFrame:
+    """
+    分塊加載 CSV 文件到 DataFrame
     
-    # 停止監控並生成報告
-    monitor.stop()
+    對於大型 CSV 文件，分塊加載可以減少記憶體使用。
     
-    # 測試記憶體映射數組
-    memmap_arr = memory_mapped_array((1000, 1000))
-    memmap_arr[:] = np.random.randn(1000, 1000)
+    參數:
+        path (str): CSV 文件路徑
+        chunk_size (int): 每個塊的行數
+        dtype (Dict, optional): 列的數據類型
+        compression (str, optional): 壓縮格式，如 'gzip', 'bz2', 'zip' 等
+        
+    返回:
+        pd.DataFrame: 加載的 DataFrame
+    """
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"文件不存在: {path}")
     
-    # 測試 DataFrame 記憶體優化
-    df = pd.DataFrame({
-        'int_col': np.random.randint(0, 100, 10000),
-        'float_col': np.random.randn(10000),
-        'str_col': ['str_' + str(i % 10) for i in range(10000)]
-    })
+    logger.info(f"分塊加載 CSV 文件: {path}")
     
-    df_optimized = optimize_dataframe_memory(df, deep_optimization=True)
+    # 使用 pandas 的 chunking 功能
+    chunks = []
+    for i, chunk in enumerate(pd.read_csv(path, chunksize=chunk_size, dtype=dtype, compression=compression)):
+        chunks.append(chunk)
+        logger.info(f"已加載塊 {i+1}，形狀: {chunk.shape}")
+        
+        # 定期清理記憶體
+        if (i + 1) % 5 == 0:
+            clean_memory()
     
-    # 測試記憶體使用追蹤
-    with track_memory_usage("大型數組操作", detailed=True):
-        # 分配一些記憶體
-        arr = np.random.randn(2000, 2000)
-        time.sleep(1)
-        del arr
+    # 合併所有塊
+    logger.info(f"合併 {len(chunks)} 個塊")
+    df = pd.concat(chunks, ignore_index=True)
     
-    # 測試記憶體使用情況打印
-    print_memory_usage(detailed=True)
+    # 釋放記憶體
+    del chunks
+    clean_memory()
     
-    # 測試優化建議
-    print_optimization_suggestions()
+    logger.info(f"加載完成，DataFrame 形狀: {df.shape}")
     
-    # 測試記憶體洩漏檢測
-    def leaky_function():
-        # 模擬記憶體洩漏
-        global leaky_list
-        if not 'leaky_list' in globals():
-            leaky_list = []
-        leaky_list.append(np.random.randn(100, 100))
-        time.sleep(0.5)
+    return df
+
+
+def optimize_dataframe_memory(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    優化 DataFrame 的記憶體使用
     
-    detect_memory_leaks(iterations=3, func=leaky_function)
+    通過將列轉換為更合適的數據類型來減少記憶體使用。
     
-    # 測試自適應批次大小
-    batch_size = adaptive_batch_size(128, memory_threshold=0.5)
-    print(f"自適應批次大小: {batch_size}")
+    參數:
+        df (pd.DataFrame): 要優化的 DataFrame
+        
+    返回:
+        pd.DataFrame: 優化後的 DataFrame
+    """
+    start_mem = df.memory_usage(deep=True).sum() / (1024 * 1024)
+    logger.info(f"優化前 DataFrame 記憶體使用: {start_mem:.2f} MB")
     
-    # 清理記憶體
-    clean_memory(aggressive=True)
+    # 複製 DataFrame 以避免修改原始數據
+    df_optimized = df.copy()
+    
+    # 處理數值型列
+    for col in df_optimized.select_dtypes(include=['int']).columns:
+        # 獲取列的最小值和最大值
+        col_min = df_optimized[col].min()
+        col_max = df_optimized[col].max()
+        
+        # 根據數據範圍選擇合適的數據類型
+        if col_min >= 0:
+            if col_max < 2**8:
+                df_optimized[col] = df_optimized[col].astype(np.uint8)
+            elif col_max < 2**16:
+                df_optimized[col] = df_optimized[col].astype(np.uint16)
+            elif col_max < 2**32:
+                df_optimized[col] = df_optimized[col].astype(np.uint32)
+            else:
+                df_optimized[col] = df_optimized[col].astype(np.uint64)
+        else:
+            if col_min > -2**7 and col_max < 2**7:
+                df_optimized[col] = df_optimized[col].astype(np.int8)
+            elif col_min > -2**15 and col_max < 2**15:
+                df_optimized[col] = df_optimized[col].astype(np.int16)
+            elif col_min > -2**31 and col_max < 2**31:
+                df_optimized[col] = df_optimized[col].astype(np.int32)
+            else:
+                df_optimized[col] = df_optimized[col].astype(np.int64)
+    
+    # 處理浮點型列
+    for col in df_optimized.select_dtypes(include=['float']).columns:
+        # 嘗試使用 float32 而不是 float64
+        df_optimized[col] = df_optimized[col].astype(np.float32)
+    
+    # 處理對象型列
+    for col in df_optimized.select_dtypes(include=['object']).columns:
+        # 如果唯一值較少，使用分類類型
+        if df_optimized[col].nunique() / len(df_optimized) < 0.5:
+            df_optimized[col] = df_optimized[col].astype('category')
+    
+    # 計算優化後的記憶體使用
+    end_mem = df_optimized.memory_usage(deep=True).sum() / (1024 * 1024)
+    logger.info(f"優化後 DataFrame 記憶體使用: {end_mem:.2f} MB")
+    logger.info(f"記憶體使用減少: {(start_mem - end_mem) / start_mem * 100:.2f}%")
+    
+    return df_optimized
+
+
+def get_memory_optimization_suggestions() -> Dict[str, Any]:
+    """
+    獲取記憶體優化建議
+    
+    根據當前系統狀態提供記憶體優化建議。
+    
+    返回:
+        Dict[str, Any]: 優化建議
+    """
+    # 獲取記憶體使用情況
+    mem_info = get_memory_usage()
+    
+    suggestions = {
+        "high_memory_usage": False,
+        "high_gpu_usage": False,
+        "suggestions": []
+    }
+    
+    # 系統記憶體使用率高
+    if mem_info['system_memory_percent'] > 80:
+        suggestions["high_memory_usage"] = True
+        suggestions["suggestions"].extend([
+            "減小批次大小或使用記憶體映射",
+            "啟用增量式資料加載 (incremental_loading=True)",
+            "使用 save_preprocessed=True 保存預處理結果，避免重複計算"
+        ])
+    
+    # GPU 記憶體使用高
+    if torch.cuda.is_available() and mem_info['gpu_memory_mb'] > 1000:
+        suggestions["high_gpu_usage"] = True
+        suggestions["suggestions"].extend([
+            "使用混合精度訓練 (use_mixed_precision=True)",
+            "啟用梯度檢查點 (use_gradient_checkpointing=True) 減少激活值記憶體使用",
+            "考慮使用梯度累積 (use_gradient_accumulation=True) 減少批次大小"
+        ])
+    
+    # 一般建議
+    suggestions["suggestions"].extend([
+        "使用子圖採樣減少圖的大小 (use_subgraph_sampling=True)",
+        "定期調用 clean_memory() 清理未使用的記憶體",
+        "對大型數據集使用 memory_mapped_array() 進行記憶體映射",
+        "使用動態批次大小 (use_dynamic_batch_size=True) 自動調整批次大小"
+    ])
+    
+    return suggestions
+
+
+def print_optimization_suggestions() -> None:
+    """
+    打印記憶體優化建議
+    
+    根據當前系統狀態提供記憶體優化建議。
+    """
+    # 獲取優化建議
+    suggestions = get_memory_optimization_suggestions()
+    
+    logger.info("記憶體優化建議:")
+    
+    # 系統記憶體使用率高
+    if suggestions["high_memory_usage"]:
+        logger.info("  1. 系統記憶體使用率高 (> 80%)，建議減小批次大小或使用記憶體映射")
+        logger.info("  2. 啟用增量式資料加載 (incremental_loading=True)")
+        logger.info("  3. 使用 save_preprocessed=True 保存預處理結果，避免重複計算")
+    
+    # GPU 記憶體使用高
+    if suggestions["high_gpu_usage"]:
+        logger.info("  4. GPU 記憶體使用較高 (> 1GB)，建議使用混合精度訓練 (use_mixed_precision=True)")
+        logger.info("  5. 啟用梯度檢查點 (use_gradient_checkpointing=True) 減少激活值記憶體使用")
+        logger.info("  6. 考慮使用梯度累積 (use_gradient_accumulation=True) 減少批次大小")
+    
+    # 一般建議
+    logger.info("  7. 使用子圖採樣減少圖的大小 (use_subgraph_sampling=True)")
+    logger.info("  8. 定期調用 clean_memory() 清理未使用的記憶體")
+    logger.info("  9. 對大型數據集使用 memory_mapped_array() 進行記憶體映射")
+    logger.info("  10. 使用動態批次大小 (use_dynamic_batch_size=True) 自動調整批次大小")
+
+
+def detect_memory_leaks(func: Callable, *args, **kwargs) -> Dict[str, Any]:
+    """
+    檢測函數執行過程中的記憶體洩漏
+    
+    參數:
+        func (Callable): 要檢測的函數
+        *args: 函數的位置參數
+        **kwargs: 函數的關鍵字參數
+        
+    返回:
+        Dict[str, Any]: 記憶體洩漏檢測結果
+    """
+    # 啟動 tracemalloc
+    tracemalloc.start()
+    
+    # 記錄開始時的記憶體使用
+    start_mem = get_memory_usage()
+    
+    # 執行函數
+    result = func(*args, **kwargs)
+    
+    # 記錄結束時的記憶體使用
+    end_mem = get_memory_usage()
+    
+    # 獲取記憶體快照
+    snapshot = tracemalloc.take_snapshot()
+    top_stats = snapshot.statistics('lineno')
+    
+    # 停止 tracemalloc
+    tracemalloc.stop()
+    
+    # 計算記憶體變化
+    mem_diff = {
+        'cpu_memory_mb': end_mem['cpu_memory_mb'] - start_mem['cpu_memory_mb'],
+        'system_memory_percent': end_mem['system_memory_percent'] - start_mem['system_memory_percent'],
+        'gpu_memory_mb': end_mem['gpu_memory_mb'] - start_mem['gpu_memory_mb']
+    }
+    
+    # 記錄可能的記憶體洩漏
+    potential_leaks = []
+    for stat in top_stats[:10]:
+        potential_leaks.append({
+            'size': stat.size / 1024,  # KB
+            'source': str(stat.traceback)
+        })
+    
+    # 強制執行垃圾回收
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    
+    # 記錄垃圾回收後的記憶體使用
+    post_gc_mem = get_memory_usage()
+    
+    # 計算垃圾回收的效果
+    gc_effect = {
+        'cpu_memory_mb': end_mem['cpu_memory_mb'] - post_gc_mem['cpu_memory_mb'],
+        'system_memory_percent': end_mem['system_memory_percent'] - post_gc_mem['system_memory_percent'],
+        'gpu_memory_mb': end_mem['gpu_memory_mb'] - post_gc_mem['gpu_memory_mb']
+    }
+    
+    # 判斷是否存在記憶體洩漏
+    has_leak = (gc_effect['cpu_memory_mb'] < 0.5 * mem_diff['cpu_memory_mb']) and (mem_diff['cpu_memory_mb'] > 10)
+    
+    # 記錄結果
+    leak_result = {
+        'function_name': func.__name__,
+        'memory_diff': mem_diff,
+        'gc_effect': gc_effect,
+        'has_leak': has_leak,
+        'potential_leaks': potential_leaks
+    }
+    
+    # 記錄日誌
+    if has_leak:
+        logger.warning(f"檢測到可能的記憶體洩漏: {func.__name__}")
+        logger.warning(f"  記憶體變化: {mem_diff['cpu_memory_mb']:.2f} MB")
+        logger.warning(f"  垃圾回收效果: {gc_effect['cpu_memory_mb']:.2f} MB")
+        for i, leak in enumerate(potential_leaks[:3], 1):
+            logger.warning(f"  可能的洩漏源 #{i}: {leak['size']:.2f} KB - {leak['source']}")
+    else:
+        logger.info(f"未檢測到記憶體洩漏: {func.__name__}")
+        logger.info(f"  記憶體變化: {mem_diff['cpu_memory_mb']:.2f} MB")
+        logger.info(f"  垃圾回收效果: {gc_effect['cpu_memory_mb']:.2f} MB")
+    
+    return leak_result
