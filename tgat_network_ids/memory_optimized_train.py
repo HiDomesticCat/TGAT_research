@@ -206,7 +206,7 @@ class MemoryOptimizedTGATTrainer:
         
         # 如果使用漸進式訓練，隨機選擇節點
         if train_size < total_nodes:
-            indices = torch.randperm(total_nodes)[:train_size]
+            indices = torch.randperm(total_nodes, device=self.device)[:train_size]
             subgraph = dgl.node_subgraph(graph, indices)
             sub_labels = labels[indices]
         else:
@@ -234,7 +234,7 @@ class MemoryOptimizedTGATTrainer:
             # 獲取批次索引
             start_idx = batch_idx * batch_size
             end_idx = min((batch_idx + 1) * batch_size, num_nodes)
-            batch_indices = torch.arange(start_idx, end_idx)
+            batch_indices = torch.arange(start_idx, end_idx, device=self.device)
             
             # 獲取批次子圖
             batch_subgraph = dgl.node_subgraph(subgraph, batch_indices)
@@ -352,7 +352,7 @@ class MemoryOptimizedTGATTrainer:
                 # 獲取批次索引
                 start_idx = batch_idx * batch_size
                 end_idx = min((batch_idx + 1) * batch_size, num_nodes)
-                batch_indices = torch.arange(start_idx, end_idx)
+                batch_indices = torch.arange(start_idx, end_idx, device=self.device)
                 
                 # 獲取批次子圖
                 batch_subgraph = dgl.node_subgraph(graph, batch_indices)
