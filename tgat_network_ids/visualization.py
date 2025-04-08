@@ -54,7 +54,9 @@ class NetworkVisualizer:
         """
         plt.figure(figsize=self.figsize)
         
-        # 轉換為 NetworkX 圖
+        # 確保圖在 CPU 上，然後轉換為 NetworkX 圖
+        if g.device.type != 'cpu':
+            g = g.cpu()
         nx_g = dgl.to_networkx(g)
         
         # 定義佈局
@@ -248,8 +250,12 @@ class NetworkVisualizer:
         """
         fig, ax = plt.subplots(figsize=self.figsize)
         
-        # 將所有圖轉換為 NetworkX 圖
-        nx_graphs = [dgl.to_networkx(g) for g in graph_snapshots]
+        # 確保所有圖在 CPU 上，然後轉換為 NetworkX 圖
+        nx_graphs = []
+        for g in graph_snapshots:
+            if g.device.type != 'cpu':
+                g = g.cpu()
+            nx_graphs.append(dgl.to_networkx(g))
         
         # 獲取所有圖的節點並計算固定佈局
         all_nodes = set()
