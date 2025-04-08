@@ -19,10 +19,15 @@ pip install -r tgat_network_ids/requirements.txt
 
 ```bash
 # 使用運行腳本
-python tgat_network_ids/scripts/run.py --config tgat_network_ids/config/memory_optimized_config.yaml --mode train --data_path ./data/your_data --visualize --monitor_memory
+python TGAT_research/tgat_network_ids/scripts/run.py \
+  --config TGAT_research/tgat_network_ids/config/memory_optimized_config.yaml \
+  --mode train \
+  --data_path ./data/your_data \
+  --visualize \
+  --monitor_memory
 
-# 或使用 shell 腳本
-./tgat_network_ids/scripts/run_memory_optimized.sh
+# 或使用 shell 腳本（從項目根目錄運行）
+./TGAT_research/tgat_network_ids/scripts/run_memory_optimized.sh
 ```
 
 ## 使用指南
@@ -30,8 +35,8 @@ python tgat_network_ids/scripts/run.py --config tgat_network_ids/config/memory_o
 ### 訓練模型
 
 ```bash
-python tgat_network_ids/scripts/run.py \
-  --config tgat_network_ids/config/memory_optimized_config.yaml \
+python TGAT_research/tgat_network_ids/scripts/run.py \
+  --config TGAT_research/tgat_network_ids/config/memory_optimized_config.yaml \
   --mode train \
   --data_path ./data/your_data \
   --visualize \
@@ -41,10 +46,10 @@ python tgat_network_ids/scripts/run.py \
 ### 測試模型
 
 ```bash
-python tgat_network_ids/scripts/run.py \
-  --config tgat_network_ids/config/memory_optimized_config.yaml \
+python TGAT_research/tgat_network_ids/scripts/run.py \
+  --config TGAT_research/tgat_network_ids/config/memory_optimized_config.yaml \
   --mode test \
-  --model_path ./models/best_model.pt \
+  --model_path ./models_memory_optimized/best_model.pt \
   --data_path ./data/your_data \
   --visualize
 ```
@@ -52,17 +57,17 @@ python tgat_network_ids/scripts/run.py \
 ### 即時檢測
 
 ```bash
-python tgat_network_ids/scripts/run.py \
-  --config tgat_network_ids/config/memory_optimized_config.yaml \
+python TGAT_research/tgat_network_ids/scripts/run.py \
+  --config TGAT_research/tgat_network_ids/config/memory_optimized_config.yaml \
   --mode detect \
-  --model_path ./models/best_model.pt \
+  --model_path ./models_memory_optimized/best_model.pt \
   --data_path ./data/your_data \
   --visualize
 ```
 
 ## 配置
 
-系統可通過 YAML 配置文件進行高度自定義。主要配置文件位於 `tgat_network_ids/config/memory_optimized_config.yaml`。
+系統可通過 YAML 配置文件進行高度自定義。主要配置文件位於 `TGAT_research/tgat_network_ids/config/memory_optimized_config.yaml`。
 
 ### 主要配置選項
 
@@ -72,6 +77,9 @@ data:
   path: ./data/your_data  # 數據集路徑
   test_size: 0.2          # 用於測試的數據百分比
   batch_size: 128         # 訓練和評估的批次大小
+  use_memory_mapping: true  # 使用記憶體映射
+  save_preprocessed: true   # 保存預處理數據
+  incremental_loading: true # 增量式數據加載
 
 # 模型配置
 model:
@@ -102,18 +110,19 @@ train:
 ### 專案結構
 
 ```
-tgat_network_ids/
-├── config/                  # 配置文件
-├── legacy_code/             # 原始實現（供參考）
-├── scripts/                 # 運行腳本
-├── src/                     # 源代碼
-│   ├── data/                # 數據加載和處理
-│   ├── models/              # 模型實現
-│   ├── utils/               # 工具函數
-│   └── visualization/       # 視覺化工具
-├── SQL/                     # SQL 相關文件
-├── README.md                # 本文件
-└── requirements.txt         # 依賴項
+TGAT_research/
+└── tgat_network_ids/
+    ├── config/                  # 配置文件
+    ├── legacy_code/             # 原始實現（供參考）
+    ├── scripts/                 # 運行腳本
+    ├── src/                     # 源代碼
+    │   ├── data/                # 數據加載和處理
+    │   ├── models/              # 模型實現
+    │   ├── utils/               # 工具函數
+    │   └── visualization/       # 視覺化工具
+    ├── SQL/                     # SQL 相關文件
+    ├── README.md                # 本文件
+    └── requirements.txt         # 依賴項
 ```
 
 ### 主要組件
@@ -128,6 +137,7 @@ tgat_network_ids/
 
 3. **工具 (`src/utils/`)**: 
    - `memory_utils.py`: 記憶體優化工具
+   - `utils.py`: 一般工具函數
 
 4. **視覺化 (`src/visualization/`)**: 
    - `visualization.py`: 圖和結果視覺化工具
@@ -182,6 +192,11 @@ tgat_network_ids/
    - 確保您的數據格式正確
    - 檢查配置中的數據路徑
    - 嘗試使用較小的數據集進行測試
+
+4. **路徑問題**：
+   - 確保從正確的目錄運行腳本
+   - 檢查腳本中的相對路徑是否正確
+   - 如果使用 shell 腳本，確保它有執行權限 (`chmod +x run_memory_optimized.sh`)
 
 ## 許可證
 
