@@ -424,8 +424,10 @@ def simulate_real_time_detection(config, data_loader, model, device='cpu', visua
             )
             
             node_labels = graph.ndata['label'].cpu().numpy()
+            # 確保圖在 CPU 上再進行視覺化
+            graph_cpu = graph.cpu() if graph.device.type != 'cpu' else graph
             visualizer.visualize_graph(
-                g=graph,
+                g=graph_cpu,
                 node_labels=node_labels,
                 title=f"網路流量圖結構 (批次 {batch_idx})",
                 save_path=graph_path
