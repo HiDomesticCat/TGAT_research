@@ -225,6 +225,182 @@ tgat_network_ids/
 ### 攻擊檢測結果
 ![攻擊檢測結果](./docs/detection_results.png)
 
+---
+
+# Memory-Optimized TGAT for Network Intrusion Detection
+
+This section describes the memory-optimized implementation of the TGAT network intrusion detection system, which significantly reduces memory usage during training and inference.
+
+## Problem Description
+
+The original TGAT system may encounter memory overflow issues when processing large network traffic datasets, resulting in the program being forcibly terminated by the system ("Killed"):
+
+```
+root@nnwqpbkqku:/notebooks/TGAT_research/tgat_network_ids# python main.py --config config.yaml --mode train --data_path ./data/test_v1 --visualize
+2025-04-08 05:59:43,115 - utils - INFO - 已載入配置: config.yaml
+2025-04-08 05:59:43,143 - utils - INFO - 已設置隨機種子: 42
+2025-04-08 05:59:43,143 - __main__ - INFO - 使用裝置: cuda:0
+2025-04-08 05:59:43,144 - __main__ - INFO - 加載資料集: ./data/test_v1
+2025-04-08 05:59:43,144 - data_loader - INFO - 載入資料集從: ./data/test_v1
+載入資料集:   0%|                                                                                                                            | 0/4 [00:00<?, ?it/s]Killed
+```
+
+## Memory Optimization Features
+
+The memory-optimized implementation includes various techniques to reduce memory usage:
+
+1. **Data Loading and Preprocessing Optimizations**
+   - Incremental data loading: Load large datasets in chunks
+   - Memory mapping: Use disk as virtual memory
+   - Data compression: Reduce memory footprint
+   - Preprocessed data caching: Avoid redundant computations
+
+2. **Graph Structure Optimizations**
+   - Subgraph sampling: Limit the number of nodes and edges
+   - Sparse representation: Reduce memory usage
+   - Batch processing of edges: Add edges in batches
+   - Periodic pruning of inactive nodes: Free up memory
+
+3. **Model Training Optimizations**
+   - Mixed precision training: Use FP16 instead of FP32
+   - Gradient accumulation: Reduce batch size
+   - Gradient checkpointing: Reduce memory usage of intermediate activations
+   - Dynamic batch sizing: Adjust batch size based on memory usage
+   - Progressive training: Start with small dataset and gradually increase
+
+4. **Active Memory Management**
+   - Memory usage monitoring: Monitor memory usage in real-time
+   - Active garbage collection: Periodically clean up unused memory
+   - GPU memory optimization: Clear CUDA cache
+
+## Memory-Optimized Project Structure
+
+```
+tgat_network_ids/
+├── memory_optimized_main.py                # Memory-optimized main program
+├── memory_optimized_data_loader.py         # Memory-optimized data loading and preprocessing
+├── memory_optimized_graph_builder.py       # Memory-optimized dynamic graph structure building
+├── memory_optimized_train.py               # Memory-optimized model training and evaluation
+├── memory_utils.py                         # Memory optimization utility module
+├── memory_optimized_config.yaml            # Memory-optimized configuration file
+├── run_memory_optimized.sh                 # Script to run the memory-optimized system
+└── ... (original files)
+```
+
+## Using the Memory-Optimized System
+
+### 1. Configuration
+
+Edit the `memory_optimized_config.yaml` file to adjust parameters according to your needs. Pay special attention to memory optimization related configuration options:
+
+```yaml
+data:
+  use_memory_mapping: true        # Enable memory mapping for large datasets
+  save_preprocessed: true         # Save preprocessed data to avoid redundant computations
+  incremental_loading: true       # Load data incrementally in chunks
+  chunk_size_mb: 100              # Size of each data chunk in MB
+
+graph:
+  use_subgraph_sampling: true     # Sample subgraphs to reduce memory
+  max_nodes_per_subgraph: 5000    # Limit nodes in subgraphs
+
+model:
+  use_mixed_precision: true       # Use FP16 instead of FP32 where possible
+  use_gradient_accumulation: true # Accumulate gradients to reduce memory
+  use_gradient_checkpointing: true # Use gradient checkpointing to reduce memory
+
+train:
+  use_dynamic_batch_size: true    # Dynamically adjust batch size based on memory
+```
+
+### 2. Running the System
+
+Use the provided script to run the memory-optimized system:
+
+```bash
+./run_memory_optimized.sh
+```
+
+Or run manually:
+
+```bash
+python memory_optimized_main.py --config memory_optimized_config.yaml --mode train --data_path ./data/test_v1 --visualize --monitor_memory
+```
+
+### 3. Memory Usage Monitoring
+
+Use the `--monitor_memory` parameter to enable memory monitoring. The system will record memory usage during training and generate reports in the `memory_reports` directory.
+
+## Memory Optimization Techniques in Detail
+
+### Incremental Data Loading
+
+The original version loads all data at once, while the optimized version reads in batches:
+
+```python
+# Original version
+df = pd.read_csv(file_path)
+
+# Optimized version
+chunks = []
+for chunk in pd.read_csv(file_path, chunksize=chunk_size):
+    chunks.append(chunk)
+    # Periodically clean memory
+    clean_memory()
+df = pd.concat(chunks, ignore_index=True)
+```
+
+### Memory Mapping
+
+For large arrays, memory mapping stores data on disk:
+
+```python
+# Original version
+features = df[feature_cols].values
+
+# Optimized version
+features = memory_mapped_array(
+    shape=(len(df), len(feature_cols)),
+    dtype=np.float32,
+    filename=features_file
+)
+```
+
+### Subgraph Sampling
+
+Limit the number of nodes and edges in the graph to avoid excessive memory usage:
+
+```python
+# Original version processes all nodes and edges
+# Optimized version limits quantities
+if len(nodes) > max_nodes_per_subgraph:
+    nodes = nodes[:max_nodes_per_subgraph]
+if len(edges) > max_edges_per_subgraph:
+    edges = edges[:max_edges_per_subgraph]
+```
+
+### Mixed Precision Training
+
+Use FP16 instead of FP32 for training to reduce memory usage:
+
+```python
+# Original version
+model.train()
+
+# Optimized version
+with torch.cuda.amp.autocast(enabled=use_mixed_precision):
+    model.train()
+```
+
+## Troubleshooting
+
+If you still encounter memory issues, try the following:
+
+1. **Reduce batch size**: Lower the `train.batch_size` value in `memory_optimized_config.yaml`
+2. **Increase data chunking**: Reduce the `data.chunk_size_mb` value to make each data chunk smaller
+3. **Enable more optimization options**: Ensure all memory optimization options are enabled
+4. **Limit GPU memory usage**: Set `system.limit_gpu_memory` to 70-80% of your GPU memory
+
 ## 引用
 
 如果您在研究或專案中使用了本系統，請引用以下論文：
