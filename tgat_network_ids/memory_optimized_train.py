@@ -357,14 +357,25 @@ class MemoryOptimizedTGATTrainer:
                 # 獲取批次子圖
                 batch_subgraph = dgl.node_subgraph(graph, batch_indices)
                 
-                # 前向傳播 (使用混合精度)
-                if self.use_mixed_precision and self.device != 'cpu':
-                    with torch.cuda.amp.autocast():
-                        logits = self.model(batch_subgraph)
-                else:
-                    logits = self.model(batch_subgraph)
+                # 檢查子圖是否有邊
+                if batch_subgraph.num_edges() == 0:
+                    logger.warning(f"批次 {batch_idx} 的子圖沒有邊，添加自環")
+                    # 添加自環以確保圖有邊
+                    batch_subgraph = dgl.add_self_loop(batch_subgraph)
                 
-                all_logits.append(logits)
+                # 前向傳播 (使用混合精度)
+                try:
+                    if self.use_mixed_precision and self.device != 'cpu':
+                        with torch.cuda.amp.autocast():
+                            logits = self.model(batch_subgraph)
+                    else:
+                        logits = self.model(batch_subgraph)
+                    
+                    all_logits.append(logits)
+                except Exception as e:
+                    logger.warning(f"處理批次 {batch_idx} 時發生錯誤: {e}")
+                    # 跳過這個批次
+                    continue
                 
                 # 定期清理記憶體
                 if batch_idx % 10 == 0:
