@@ -305,49 +305,49 @@ class MemoryMonitor:
         
         logger.info(f"記憶體使用報告已保存至: {report_file}")
         
-        # 繪製記憶體使用圖表
+        # Draw memory usage charts (in English)
         plt.figure(figsize=(12, 8))
         
-        # CPU 記憶體使用
+        # CPU memory usage
         plt.subplot(2, 1, 1)
-        plt.plot(self.timestamps, self.memory_usage, label='進程記憶體使用')
-        plt.axhline(y=self.peak_memory, color='r', linestyle='--', label=f'峰值: {self.peak_memory:.2f} MB')
-        plt.xlabel('時間')
-        plt.ylabel('記憶體使用 (MB)')
-        plt.title('進程記憶體使用趨勢')
+        plt.plot(self.timestamps, self.memory_usage, label='Process Memory Usage')
+        plt.axhline(y=self.peak_memory, color='r', linestyle='--', label=f'Peak: {self.peak_memory:.2f} MB')
+        plt.xlabel('Time')
+        plt.ylabel('Memory Usage (MB)')
+        plt.title('Process Memory Usage Trend')
         plt.grid(True)
         plt.legend()
         
-        # 系統記憶體使用率
+        # System memory usage percentage
         plt.subplot(2, 1, 2)
         system_percents = [m['percent'] for m in self.system_memory_usage]
-        plt.plot(self.timestamps, system_percents, label='系統記憶體使用率', color='green')
-        plt.axhline(y=self.alert_threshold, color='r', linestyle='--', label=f'警告閾值: {self.alert_threshold}%')
-        plt.xlabel('時間')
-        plt.ylabel('使用率 (%)')
-        plt.title('系統記憶體使用率趨勢')
+        plt.plot(self.timestamps, system_percents, label='System Memory Usage', color='green')
+        plt.axhline(y=self.alert_threshold, color='r', linestyle='--', label=f'Alert Threshold: {self.alert_threshold}%')
+        plt.xlabel('Time')
+        plt.ylabel('Usage (%)')
+        plt.title('System Memory Usage Trend')
         plt.grid(True)
         plt.legend()
         
         plt.tight_layout()
         plt.savefig(plot_file)
         
-        # 如果有 GPU 數據，繪製 GPU 記憶體使用圖表
+        # If GPU data is available, draw GPU memory usage chart
         if self.enable_gpu and self.gpu_memory_usage:
             gpu_plot_file = os.path.join(self.report_dir, f"gpu_memory_plot_{timestamp}.png")
             plt.figure(figsize=(12, 6))
-            plt.plot(self.timestamps, self.gpu_memory_usage, label='GPU 記憶體使用', color='orange')
-            plt.axhline(y=self.peak_gpu_memory, color='r', linestyle='--', label=f'峰值: {self.peak_gpu_memory:.2f} MB')
-            plt.xlabel('時間')
-            plt.ylabel('記憶體使用 (MB)')
-            plt.title('GPU 記憶體使用趨勢')
+            plt.plot(self.timestamps, self.gpu_memory_usage, label='GPU Memory Usage', color='orange')
+            plt.axhline(y=self.peak_gpu_memory, color='r', linestyle='--', label=f'Peak: {self.peak_gpu_memory:.2f} MB')
+            plt.xlabel('Time')
+            plt.ylabel('Memory Usage (MB)')
+            plt.title('GPU Memory Usage Trend')
             plt.grid(True)
             plt.legend()
             plt.tight_layout()
             plt.savefig(gpu_plot_file)
-            logger.info(f"GPU 記憶體使用圖表已保存至: {gpu_plot_file}")
+            logger.info(f"GPU memory usage chart saved to: {gpu_plot_file}")
         
-        logger.info(f"記憶體使用圖表已保存至: {plot_file}")
+        logger.info(f"Memory usage charts saved to: {plot_file}")
         
         # 返回報告摘要
         summary = {
