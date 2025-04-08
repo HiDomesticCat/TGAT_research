@@ -170,7 +170,7 @@ def build_graph(config, data_loader, features, labels, indices=None):
         node_labels = labels
     
     # 過濾邊並獲取時間戳記
-    if edges is not None:
+    if edges is not None and len(edges) > 0:
         # 如果提供了索引，過濾只包含這些節點的邊
         if indices is not None:
             filtered_edges = []
@@ -181,32 +181,36 @@ def build_graph(config, data_loader, features, labels, indices=None):
         
         # 使用邊的時間作為節點時間
         timestamps = [edge[2] for edge in edges]
-    else:
-        # 如果沒有邊，使用默認時間戳記
-        logger.warning("未獲取到時間性邊，使用默認時間戳記")
-        edges = []
-        timestamps = [0.0] * len(node_ids)
-    if not timestamps:
-        timestamps = [0.0] * len(node_ids)
-    else:
+        
         # 確保每個節點都有時間戳記
-        while len(timestamps) < len(node_ids):
-            timestamps.append(timestamps[-1])
-    
-    # 添加節點
-    graph_builder.add_nodes(node_ids, node_features, timestamps, node_labels)
-    
-    # 添加邊
-    if edges:
+        if not timestamps:
+            timestamps = [0.0] * len(node_ids)
+        else:
+            while len(timestamps) < len(node_ids):
+                timestamps.append(timestamps[-1])
+        
+        # 添加節點
+        graph_builder.add_nodes(node_ids, node_features, timestamps, node_labels)
+        
+        # 添加邊
         src_nodes = [edge[0] for edge in edges]
         dst_nodes = [edge[1] for edge in edges]
         edge_timestamps = [edge[2] for edge in edges]
         edge_feats = [edge[3] for edge in edges]
         
         graph_builder.add_edges_in_batches(src_nodes, dst_nodes, edge_timestamps, edge_feats)
-    
-    # 更新時間圖
-    graph = graph_builder.update_temporal_graph()
+        
+        # 更新時間圖
+        graph = graph_builder.update_temporal_graph()
+    else:
+        # 如果沒有邊或邊數量為0，使用 simulate_stream 方法創建邊
+        logger.warning("未獲取到時間性邊，使用 simulate_stream 方法創建邊")
+        
+        # 創建時間戳記 (使用索引作為時間戳記)
+        timestamps = [float(i) for i in range(len(node_ids))]
+        
+        # 使用 simulate_stream 方法創建邊
+        graph = graph_builder.simulate_stream(node_ids, node_features, timestamps, node_labels)
     
     logger.info(f"構建圖完成:")
     logger.info(f"  節點數量: {graph.num_nodes()}")
