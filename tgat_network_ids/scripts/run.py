@@ -12,7 +12,7 @@ import argparse
 # Add parent directory to path to import modules
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from src.memory_optimized_main import main
+from tgat_network_ids.src.memory_optimized_main import main
 
 if __name__ == "__main__":
     main()

@@ -19,8 +19,8 @@ export PYTHONGC=1
 export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:128
 
 # 執行記憶體優化版主程式
-python memory_optimized_main.py \
-  --config memory_optimized_config.yaml \
+python tgat_network_ids/scripts/run.py \
+  --config tgat_network_ids/config/memory_optimized_config.yaml \
   --mode train \
   --data_path ./data/test_v1 \
   --visualize \
