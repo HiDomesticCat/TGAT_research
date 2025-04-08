@@ -22,6 +22,6 @@ export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:128
 python TGAT_research/tgat_network_ids/scripts/run.py \
   --config TGAT_research/tgat_network_ids/config/memory_optimized_config.yaml \
   --mode train \
-  --data_path ./data/test_v1 \
+  --data_path TGAT_research/tgat_network_ids/data/test_v1/Syn.csv \
   --visualize \
   --monitor_memory
