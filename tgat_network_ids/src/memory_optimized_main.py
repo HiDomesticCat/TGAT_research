@@ -164,20 +164,28 @@ def build_graph(config, data_loader, features, labels, indices=None):
         node_ids = indices
         node_features = features[indices]
         node_labels = labels[indices] if isinstance(labels, np.ndarray) else labels.iloc[indices].values
-        
-        # 過濾只包含這些節點的邊
-        filtered_edges = []
-        for src, dst, time, feat in edges:
-            if src in node_ids and dst in node_ids:
-                filtered_edges.append((src, dst, time, feat))
-        edges = filtered_edges
     else:
         node_ids = list(range(len(features)))
         node_features = features
         node_labels = labels
     
-    # 添加節點
-    timestamps = [edge[2] for edge in edges]  # 使用邊的時間作為節點時間
+    # 過濾邊並獲取時間戳記
+    if edges is not None:
+        # 如果提供了索引，過濾只包含這些節點的邊
+        if indices is not None:
+            filtered_edges = []
+            for src, dst, time, feat in edges:
+                if src in node_ids and dst in node_ids:
+                    filtered_edges.append((src, dst, time, feat))
+            edges = filtered_edges
+        
+        # 使用邊的時間作為節點時間
+        timestamps = [edge[2] for edge in edges]
+    else:
+        # 如果沒有邊，使用默認時間戳記
+        logger.warning("未獲取到時間性邊，使用默認時間戳記")
+        edges = []
+        timestamps = [0.0] * len(node_ids)
     if not timestamps:
         timestamps = [0.0] * len(node_ids)
     else:
