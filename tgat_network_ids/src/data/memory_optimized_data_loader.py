@@ -673,3 +673,37 @@ class MemoryOptimizedDataLoader:
         
         logger.info(f"Created {len(edges)} synthetic edges")
         return edges
+    
+    @memory_usage_decorator
+    def get_sample_batch(self, batch_size=1000):
+        """
+        Get a sample batch for simulating dynamic graph updates
+        
+        Parameters:
+            batch_size (int): Batch size
+            
+        Returns:
+            tuple: (batch_features, batch_labels, batch_indices)
+        """
+        if self.features is None or self.target is None:
+            self.preprocess()
+        
+        total_samples = len(self.target)
+        if batch_size > total_samples:
+            batch_size = total_samples
+        
+        # Random sampling
+        indices = np.random.choice(total_samples, batch_size, replace=False)
+        
+        # Get features and labels for the selected indices
+        if self.use_memory_mapping:
+            # For memory-mapped arrays, use direct indexing
+            batch_features = self.features[indices]
+        else:
+            # For regular arrays
+            batch_features = self.features[indices]
+        
+        # Get labels
+        batch_labels = self.target.iloc[indices].values if isinstance(self.target, pd.Series) else self.target[indices]
+        
+        return batch_features, batch_labels, indices
