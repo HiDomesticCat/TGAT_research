@@ -681,9 +681,9 @@ class MemoryOptimizedTGATTrainer:
         else:
             sns.heatmap(cm, annot=True, fmt='d', cmap='Blues')
         
-        plt.xlabel('預測標籤')
-        plt.ylabel('真實標籤')
-        plt.title('混淆矩陣')
+        plt.xlabel('Predicted Label')
+        plt.ylabel('True Label')
+        plt.title('Confusion Matrix')
         plt.tight_layout()
         
         # 保存圖表
@@ -705,23 +705,23 @@ class MemoryOptimizedTGATTrainer:
         
         # 繪製損失曲線
         plt.subplot(1, 2, 1)
-        plt.plot(self.train_losses, label='訓練損失')
+        plt.plot(self.train_losses, label='Train Loss')
         if self.val_losses:
-            plt.plot(self.val_losses, label='驗證損失')
+            plt.plot(self.val_losses, label='Validation Loss')
         plt.xlabel('Epoch')
-        plt.ylabel('損失')
-        plt.title('訓練與驗證損失')
+        plt.ylabel('Loss')
+        plt.title('Training and Validation Loss')
         plt.legend()
         plt.grid(True)
         
         # 繪製精度曲線
         plt.subplot(1, 2, 2)
-        plt.plot(self.train_accuracies, label='訓練精度')
+        plt.plot(self.train_accuracies, label='Train Accuracy')
         if self.val_accuracies:
-            plt.plot(self.val_accuracies, label='驗證精度')
+            plt.plot(self.val_accuracies, label='Validation Accuracy')
         plt.xlabel('Epoch')
-        plt.ylabel('精度')
-        plt.title('訓練與驗證精度')
+        plt.ylabel('Accuracy')
+        plt.title('Training and Validation Accuracy')
         plt.legend()
         plt.grid(True)
         
