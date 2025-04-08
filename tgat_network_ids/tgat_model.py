@@ -2,16 +2,16 @@
 # -*- coding: utf-8 -*-
 
 """
-TGAT 模型實作模組
+TGAT Model Implementation Module
 
-實作 Temporal Graph Attention Network (TGAT) 模型，
-參考論文 "Temporal Graph Attention Network for Recommendation" 
-和 "Inductive Representation Learning on Temporal Graphs"
+Implementation of Temporal Graph Attention Network (TGAT) model,
+based on papers "Temporal Graph Attention Network for Recommendation" 
+and "Inductive Representation Learning on Temporal Graphs"
 
-此模組包含:
-1. 時間編碼 (Temporal Encoding)
-2. 圖注意力層 (Graph Attention Layers)
-3. TGAT 模型架構
+This module includes:
+1. Temporal Encoding
+2. Graph Attention Layers
+3. TGAT model architecture
 """
 
 import torch
@@ -33,42 +33,42 @@ class TimeEncoding(nn.Module):
         super(TimeEncoding, self).__init__()
         self.dimension = dimension
         
-        # 初始化權重和偏置
+        # Initialize weights and biases
         self.w = nn.Linear(1, dimension, bias=True)
         
-        # 使用 Xavier 初始化權重
+        # Use Xavier initialization for weights
         nn.init.xavier_uniform_(self.w.weight)
         nn.init.zeros_(self.w.bias)
     
     def forward(self, t):
-        # 確保輸入是浮點型且二維
+        # Ensure input is float and 2D
         t = t.float()
         if t.dim() == 1:
             t = t.unsqueeze(1)
         
-        # 確保權重也是浮點型
+        # Ensure weights are also float
         self.w.weight = nn.Parameter(self.w.weight.float())
         self.w.bias = nn.Parameter(self.w.bias.float())
         
-        # 使用餘弦函數進行編碼
+        # Use cosine function for encoding
         output = torch.cos(self.w(t))
         return output
 
 class TemporalGATLayer(nn.Module):
-    """時間圖注意力層"""
+    """Temporal Graph Attention Layer"""
     
     def __init__(self, in_dim, out_dim, time_dim, num_heads=4, feat_drop=0.6, attn_drop=0.6, residual=True):
         """
-        初始化時間圖注意力層
+        Initialize temporal graph attention layer
         
-        參數:
-            in_dim (int): 輸入特徵維度
-            out_dim (int): 輸出特徵維度
-            time_dim (int): 時間編碼維度
-            num_heads (int): 注意力頭數量
-            feat_drop (float): 特徵丟棄率
-            attn_drop (float): 注意力丟棄率
-            residual (bool): 是否使用殘差連接
+        Parameters:
+            in_dim (int): Input feature dimension
+            out_dim (int): Output feature dimension
+            time_dim (int): Time encoding dimension
+            num_heads (int): Number of attention heads
+            feat_drop (float): Feature dropout rate
+            attn_drop (float): Attention dropout rate
+            residual (bool): Whether to use residual connection
         """
         super(TemporalGATLayer, self).__init__()
         self.in_dim = in_dim
@@ -76,15 +76,15 @@ class TemporalGATLayer(nn.Module):
         self.time_dim = time_dim
         self.num_heads = num_heads
         
-        # 時間編碼器
+        # Time encoder
         self.time_enc = TimeEncoding(time_dim)
         
-        # 特徵丟棄層
+        # Feature dropout layer
         self.feat_drop = nn.Dropout(feat_drop)
         
-        # 定義注意力層
+        # Define attention layer
         self.gat = GATConv(
-            in_feats=in_dim + time_dim,  # 特徵 + 時間
+            in_feats=in_dim + time_dim,  # Features + Time
             out_feats=out_dim // num_heads,
             num_heads=num_heads,
             feat_drop=feat_drop,
@@ -95,80 +95,80 @@ class TemporalGATLayer(nn.Module):
         )
     
     def forward(self, g, h, time_tensor):
-        # 獲得時間編碼
-        # 檢查時間特徵的長度，如果不匹配，則擴展或截斷
+        # Get time encoding
+        # Check time feature length, expand or truncate if not matching
         if len(time_tensor) != g.num_edges():
             if len(time_tensor) < g.num_edges():
-                # 如果時間特徵少於邊數，重複最後一個值
+                # If time features are fewer than edges, repeat the last value
                 time_tensor = torch.cat([
                     time_tensor, 
                     torch.ones(g.num_edges() - len(time_tensor), device=time_tensor.device) * time_tensor[-1]
                 ])
             else:
-                # 如果時間特徵多於邊數，截斷
+                # If time features are more than edges, truncate
                 time_tensor = time_tensor[:g.num_edges()]
         
         time_emb = self.time_enc(time_tensor)  # [num_edges, time_dim]
         
-        # 特徵丟棄
+        # Feature dropout
         h = self.feat_drop(h)
         
-        # 確保時間編碼的形狀正確
+        # Ensure time encoding has correct shape
         if time_emb.dim() == 1:
             time_emb = time_emb.unsqueeze(0)
         
-        # 將時間特徵和邊特徵合併
+        # Combine time features and edge features
         g.edata['time_feat'] = time_emb
         
         def message_func(edges):
-            # 使用串聯而不是加法
+            # Use concatenation instead of addition
             time_expanded = edges.data['time_feat'].expand_as(edges.src['h'][:, :self.time_dim])
             return {'m': torch.cat([edges.src['h'], time_expanded], dim=1)}
         
         def reduce_func(nodes):
-            # 聚合消息，取平均
+            # Aggregate messages, take mean
             return {'h_time': nodes.mailbox['m'].mean(1)}
         
-        # 應用消息傳遞
+        # Apply message passing
         g.update_all(message_func, reduce_func)
         
-        # 處理時間特徵
+        # Process time features
         h_time = g.ndata.get('h_time', torch.zeros(h.shape[0], h.shape[1] + self.time_dim, device=h.device))
         
-        # 檢查並調整 h_time 的形狀
+        # Check and adjust h_time shape
         if h_time.shape[1] != self.in_dim + self.time_dim:
-            # 如果形狀不匹配，截斷或填充
+            # If shape doesn't match, truncate or pad
             if h_time.shape[1] > self.in_dim + self.time_dim:
                 h_time = h_time[:, :self.in_dim + self.time_dim]
             else:
-                # 使用零填充
+                # Use zero padding
                 padding = torch.zeros(h_time.shape[0], self.in_dim + self.time_dim - h_time.shape[1], device=h_time.device)
                 h_time = torch.cat([h_time, padding], dim=1)
         
-        # 應用 GAT 層
+        # Apply GAT layer
         h_new = self.gat(g, h_time)
         
-        # 合併多頭注意力結果
+        # Combine multi-head attention results
         h_new = h_new.view(h_new.shape[0], -1)
         
         return h_new
 
 class TGAT(nn.Module):
-    """時間圖注意力網絡模型"""
+    """Temporal Graph Attention Network Model"""
     
     def __init__(self, in_dim, hidden_dim, out_dim, time_dim, num_layers=2, num_heads=4, dropout=0.1, num_classes=2):
         """
-        初始化 TGAT 模型
+        Initialize TGAT model
         
-        參數:
-            in_dim (int): 輸入特徵維度
-            hidden_dim (int): 隱藏層維度
-            out_dim (int): 輸出特徵維度
-            time_dim (int): 時間編碼維度
-            num_layers (int): TGAT 層數量
-            num_heads (int): 注意力頭數量
-            dropout (float): 丟棄率
-            num_classes (int): 分類類別數
+        Parameters:
+            in_dim (int): Input feature dimension
+            hidden_dim (int): Hidden layer dimension
+            out_dim (int): Output feature dimension
+            time_dim (int): Time encoding dimension
+            num_layers (int): Number of TGAT layers
+            num_heads (int): Number of attention heads
+            dropout (float): Dropout rate
+            num_classes (int): Number of classification classes
         """
         super(TGAT, self).__init__()
         
@@ -180,13 +180,13 @@ class TGAT(nn.Module):
         self.num_heads = num_heads
         self.num_classes = num_classes
         
-        # 特徵投影層
+        # Feature projection layer
         self.feat_project = nn.Linear(in_dim, hidden_dim)
         
-        # TGAT 層
+        # TGAT layers
         self.layers = nn.ModuleList()
         
-        # 第一層將輸入特徵投影到隱藏維度
+        # First layer projects input features to hidden dimension
         self.layers.append(
             TemporalGATLayer(
                 in_dim=hidden_dim,
@@ -198,7 +198,7 @@ class TGAT(nn.Module):
             )
         )
         
-        # 中間層
+        # Middle layers
         for _ in range(num_layers - 2):
             self.layers.append(
                 TemporalGATLayer(
@@ -211,7 +211,7 @@ class TGAT(nn.Module):
                 )
             )
         
-        # 最後一層
+        # Last layer
         if num_layers > 1:
             self.layers.append(
                 TemporalGATLayer(
@@ -224,7 +224,7 @@ class TGAT(nn.Module):
                 )
             )
         
-        # 分類層
+        # Classification layer
         self.classifier = nn.Sequential(
             nn.Linear(out_dim, out_dim // 2),
             nn.ReLU(),
@@ -232,20 +232,20 @@ class TGAT(nn.Module):
             nn.Linear(out_dim // 2, num_classes)
         )
         
-        # 初始化參數
+        # Initialize parameters
         self.reset_parameters()
         
-        logger.info(f"初始化 TGAT 模型: {num_layers} 層, {num_heads} 個注意力頭, {num_classes} 分類類別")
+        logger.info(f"Initialized TGAT model: {num_layers} layers, {num_heads} attention heads, {num_classes} classification classes")
     
     def reset_parameters(self):
-        """重置參數"""
+        """Reset parameters"""
         gain = nn.init.calculate_gain('relu')
         
-        # 初始化特徵投影層
+        # Initialize feature projection layer
         nn.init.xavier_normal_(self.feat_project.weight, gain=gain)
         nn.init.zeros_(self.feat_project.bias)
         
-        # 初始化分類器
+        # Initialize classifier
         for layer in self.classifier:
             if isinstance(layer, nn.Linear):
                 nn.init.xavier_normal_(layer.weight, gain=gain)
@@ -253,86 +253,86 @@ class TGAT(nn.Module):
     
     def forward(self, g):
         """
-        前向傳播
+        Forward propagation
         
-        參數:
-            g (dgl.DGLGraph): 輸入圖
+        Parameters:
+            g (dgl.DGLGraph): Input graph
             
-        返回:
-            torch.Tensor: 節點分類輸出 [num_nodes, num_classes]
+        Returns:
+            torch.Tensor: Node classification output [num_nodes, num_classes]
         """
-        # 獲取節點特徵
+        # Get node features
         h = g.ndata['h']
         
-        # 投影特徵到隱藏維度
+        # Project features to hidden dimension
         h = self.feat_project(h)
         
-        # 獲取邊的時間特徵
+        # Get edge time features
         time_tensor = g.edata.get('time', None)
         
-        # 如果沒有時間特徵，則使用全 0 時間戳記
+        # If no time features, use all 0 timestamps
         if time_tensor is None:
             time_tensor = torch.zeros(g.num_edges(), device=h.device)
         
-        # 應用 TGAT 層
+        # Apply TGAT layers
         for i, layer in enumerate(self.layers):
             h = layer(g, h, time_tensor)
         
-        # 應用分類器
+        # Apply classifier
         logits = self.classifier(h)
         
         return logits
     
     def encode(self, g):
         """
-        僅編碼節點，不進行分類
+        Encode nodes only, without classification
         
-        參數:
-            g (dgl.DGLGraph): 輸入圖
+        Parameters:
+            g (dgl.DGLGraph): Input graph
             
-        返回:
-            torch.Tensor: 節點表示 [num_nodes, out_dim]
+        Returns:
+            torch.Tensor: Node representations [num_nodes, out_dim]
         """
-        # 獲取節點特徵
+        # Get node features
         h = g.ndata['h']
         
-        # 投影特徵到隱藏維度
+        # Project features to hidden dimension
         h = self.feat_project(h)
         
-        # 獲取邊的時間特徵
+        # Get edge time features
         time_tensor = g.edata.get('time', None)
         
-        # 如果沒有時間特徵，則使用全 0 時間戳記
+        # If no time features, use all 0 timestamps
         if time_tensor is None:
             time_tensor = torch.zeros(g.num_edges(), device=h.device)
         
-        # 應用 TGAT 層
+        # Apply TGAT layers
         for i, layer in enumerate(self.layers):
             h = layer(g, h, time_tensor)
         
         return h
 
-# 測試 TGAT 模型
+# Test TGAT model
 if __name__ == "__main__":
     import numpy as np
     import dgl
     
-    # 建立一個簡單的圖
+    # Create a simple graph
     src = torch.tensor([0, 1, 2, 3, 4])
     dst = torch.tensor([1, 2, 3, 4, 0])
     g = dgl.graph((src, dst))
     
-    # 添加節點特徵
+    # Add node features
     num_nodes = 5
     in_dim = 10
     h = torch.randn(num_nodes, in_dim)
     g.ndata['h'] = h
     
-    # 添加邊時間特徵
+    # Add edge time features
     time = torch.tensor([0.1, 0.2, 0.3, 0.4, 0.5])
     g.edata['time'] = time
     
-    # 設置模型參數
+    # Set model parameters
     hidden_dim = 16
     out_dim = 16
     time_dim = 8
@@ -341,7 +341,7 @@ if __name__ == "__main__":
     dropout = 0.1
     num_classes = 3
     
-    # 初始化模型
+    # Initialize model
     model = TGAT(
         in_dim=in_dim,
         hidden_dim=hidden_dim,
@@ -353,13 +353,13 @@ if __name__ == "__main__":
         num_classes=num_classes
     )
     
-    # 前向傳播
+    # Forward propagation
     logits = model(g)
     
-    print(f"模型輸出形狀: {logits.shape}")
-    print(f"預期形狀: [5, 3]")
+    print(f"Model output shape: {logits.shape}")
+    print(f"Expected shape: [5, 3]")
     
-    # 測試節點編碼
+    # Test node encoding
     node_embeddings = model.encode(g)
-    print(f"節點表示形狀: {node_embeddings.shape}")
-    print(f"預期形狀: [5, 16]")
+    print(f"Node representation shape: {node_embeddings.shape}")
+    print(f"Expected shape: [5, 16]")
