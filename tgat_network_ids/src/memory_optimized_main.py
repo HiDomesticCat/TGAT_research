@@ -28,25 +28,66 @@ import time
 from tqdm import tqdm
 import gc
 
+import sys
+import os
+
+# 添加當前目錄到 Python 路徑
+current_dir = os.path.dirname(os.path.abspath(__file__))
+parent_dir = os.path.dirname(os.path.dirname(current_dir))
+sys.path.insert(0, parent_dir)
+
 # 導入記憶體優化工具
 from tgat_network_ids.src.utils.memory_utils import (
     clean_memory, memory_usage_decorator, print_memory_usage,
     get_memory_usage, print_optimization_suggestions, MemoryMonitor
 )
 
-# 導入工具函數
-from tgat_network_ids.src.utils.utils import (
-    set_seed, get_device, load_config, save_config, 
-    evaluate_predictions, format_metrics, create_dir, 
-    save_results, get_timestamp, time_execution
-)
+try:
+    # 嘗試使用絕對導入
+    # 導入記憶體優化工具
+    from tgat_network_ids.src.utils.memory_utils import (
+        clean_memory, memory_usage_decorator, print_memory_usage,
+        get_memory_usage, print_optimization_suggestions, MemoryMonitor
+    )
 
-# 導入記憶體優化版模組
-from tgat_network_ids.src.data.memory_optimized_data_loader import MemoryOptimizedDataLoader
-from tgat_network_ids.src.data.memory_optimized_graph_builder import MemoryOptimizedDynamicNetworkGraph
-from tgat_network_ids.src.models.tgat_model import TGAT
-from tgat_network_ids.src.models.memory_optimized_train import MemoryOptimizedTGATTrainer
-from tgat_network_ids.src.visualization.visualization import NetworkVisualizer
+    # 導入工具函數
+    from tgat_network_ids.src.utils.utils import (
+        set_seed, get_device, load_config, save_config, 
+        evaluate_predictions, format_metrics, create_dir, 
+        save_results, get_timestamp, time_execution
+    )
+
+    # 導入記憶體優化版模組
+    from tgat_network_ids.src.data.memory_optimized_data_loader import MemoryOptimizedDataLoader
+    from tgat_network_ids.src.data.memory_optimized_graph_builder import MemoryOptimizedDynamicNetworkGraph
+    from tgat_network_ids.src.models.tgat_model import TGAT
+    from tgat_network_ids.src.models.memory_optimized_train import MemoryOptimizedTGATTrainer
+    from tgat_network_ids.src.visualization.visualization import NetworkVisualizer
+except ModuleNotFoundError:
+    # 如果絕對導入失敗，嘗試使用相對路徑導入
+    print("使用相對路徑導入模組...")
+    
+    # 導入記憶體優化工具
+    sys.path.insert(0, os.path.join(current_dir, '..'))
+    
+    from utils.memory_utils import (
+        clean_memory, memory_usage_decorator, print_memory_usage,
+        get_memory_usage, print_optimization_suggestions, MemoryMonitor
+    )
+
+    # 導入工具函數
+    from utils.utils import (
+        set_seed, get_device, load_config, save_config, 
+        evaluate_predictions, format_metrics, create_dir, 
+        save_results, get_timestamp, time_execution
+    )
+
+    # 導入記憶體優化版模組
+    from data.memory_optimized_data_loader import MemoryOptimizedDataLoader
+    from data.memory_optimized_graph_builder import MemoryOptimizedDynamicNetworkGraph
+    from models.tgat_model import TGAT
+    from models.memory_optimized_train import MemoryOptimizedTGATTrainer
+    from visualization.visualization import NetworkVisualizer
 
 # 設置日誌
 logging.basicConfig(
