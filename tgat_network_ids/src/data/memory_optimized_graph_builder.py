@@ -70,16 +70,19 @@ class MemoryOptimizedDynamicNetworkGraph:
         # 檢查 CUDA 是否可用
         if device == 'cuda' and torch.cuda.is_available():
             try:
-                # 嘗試初始化 CUDA
-                torch.cuda.init()
+                # 嘗試初始化 CUDA (使用一個簡單的 CUDA 操作來觸發初始化)
+                test_tensor = torch.zeros(1, device='cuda')
+                del test_tensor  # 釋放測試張量
                 self.device = device
+                logger.info(f"成功初始化 CUDA，使用 GPU 設備")
             except Exception as e:
                 logger.warning(f"CUDA 初始化失敗，使用 CPU 代替: {str(e)}")
                 self.device = 'cpu'
         else:
+            logger.info(f"CUDA 不可用，使用 CPU 設備")
             self.device = 'cpu'
         
-        logger.info(f"使用裝置: {self.device}")
+        logger.info(f"最終使用裝置: {self.device}")
         
         # 初始化圖結構
         self.g = None  # 主圖
