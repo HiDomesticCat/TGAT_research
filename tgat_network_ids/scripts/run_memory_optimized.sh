@@ -3,12 +3,13 @@
 # 記憶體優化版 TGAT 網路攻擊檢測系統執行腳本
 
 # 創建必要的目錄
-mkdir -p ./preprocessed_data
-mkdir -p ./models_memory_optimized
-mkdir -p ./results_memory_optimized
-mkdir -p ./visualizations_memory_optimized
-mkdir -p ./memory_reports
-mkdir -p ./checkpoints_memory_optimized
+mkdir -p ./recode
+mkdir -p ./recode/preprocessed_data
+mkdir -p ./recode/models_memory_optimized
+mkdir -p ./recode/results_memory_optimized
+mkdir -p ./recode/visualizations_memory_optimized
+mkdir -p ./recode/memory_reports
+mkdir -p ./recode/checkpoints_memory_optimized
 
 # 設置 Python 垃圾回收參數
 export PYTHONMALLOC=malloc
@@ -19,7 +20,7 @@ export PYTHONGC=1
 export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:128,garbage_collection_threshold:0.8
 
 # 設置 CUDA 緩存大小 (限制為 1GB)
-export CUDA_CACHE_MAXSIZE=1073741824
+export CUDA_CACHE_MAXSIZE=1073741824*10
 
 # 設置 OMP 線程數 (避免過多線程競爭)
 export OMP_NUM_THREADS=4
@@ -51,7 +52,7 @@ echo "開始執行記憶體優化版 TGAT 網路攻擊檢測系統..."
 $NUMA_CMD python ./tgat_network_ids/src/memory_optimized_main.py \
   --config ./tgat_network_ids/config/memory_optimized_config.yaml \
   --mode train \
-  --data_path ./tgat_network_ids/data/test_v1/Syn.csv \
+  --data_path ./tgat_network_ids/data/test_v1/ \
   --visualize \
   --monitor_memory
 
