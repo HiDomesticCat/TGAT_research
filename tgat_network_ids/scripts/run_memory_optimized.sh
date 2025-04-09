@@ -16,7 +16,7 @@ export PYTHONMALLOCSTATS=1
 export PYTHONGC=1
 
 # 設置 CUDA 記憶體分配器
-export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:128,roundup_power2:True,garbage_collection_threshold:0.8
+export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:128,garbage_collection_threshold:0.8
 
 # 設置 CUDA 緩存大小 (限制為 1GB)
 export CUDA_CACHE_MAXSIZE=1073741824
