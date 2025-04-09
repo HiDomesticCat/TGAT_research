@@ -67,7 +67,19 @@ class MemoryOptimizedDynamicNetworkGraph:
         self.inactive_threshold = graph_config.get('inactive_threshold', 1800)  # 30分鐘
         
         # 設置裝置
-        self.device = device
+        # 檢查 CUDA 是否可用
+        if device == 'cuda' and torch.cuda.is_available():
+            try:
+                # 嘗試初始化 CUDA
+                torch.cuda.init()
+                self.device = device
+            except Exception as e:
+                logger.warning(f"CUDA 初始化失敗，使用 CPU 代替: {str(e)}")
+                self.device = 'cpu'
+        else:
+            self.device = 'cpu'
+        
+        logger.info(f"使用裝置: {self.device}")
         
         # 初始化圖結構
         self.g = None  # 主圖
