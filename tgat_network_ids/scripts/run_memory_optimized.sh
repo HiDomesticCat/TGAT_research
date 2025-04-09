@@ -48,10 +48,10 @@ fi
 echo "開始執行記憶體優化版 TGAT 網路攻擊檢測系統..."
 
 # 執行記憶體優化版主程式
-$NUMA_CMD python -m tgat_network_ids.src.memory_optimized_main \
-  --config tgat_network_ids/config/memory_optimized_config.yaml \
+$NUMA_CMD python ./tgat_network_ids/src/memory_optimized_main.py \
+  --config ./tgat_network_ids/config/memory_optimized_config.yaml \
   --mode train \
-  --data_path tgat_network_ids/data/test_v1/Syn.csv \
+  --data_path ./tgat_network_ids/data/test_v1/Syn.csv \
   --visualize \
   --monitor_memory
 
