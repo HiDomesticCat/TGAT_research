@@ -468,7 +468,7 @@ class MemoryOptimizedDataLoader:
     
     def _load_preprocessed_data(self):
         """加載預處理後的資料"""
-        with track_memory_usage("加載預處理資料", detailed=True):
+        with track_memory_usage("加載預處理資料"):
             logger.info(f"加載預處理資料從: {self.preprocessed_path}")
             
             files = self._get_preprocessed_files()
