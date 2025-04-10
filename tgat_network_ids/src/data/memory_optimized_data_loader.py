@@ -234,8 +234,8 @@ class MemoryOptimizedDataLoader:
         clean_memory()
     
     def _load_single_file_incrementally(self, file_path):
-        """增量式加載單個文件"""
-        logger.info(f"增量式加載單個文件: {file_path}")
+        """增量式加載單個文件 - 極度優化版本"""
+        logger.info(f"增量式加載單個文件 (極度優化版本): {file_path}")
         
         # 檢查是否有預處理的二進制文件
         binary_path = file_path.replace('.csv', '.parquet')
@@ -245,9 +245,10 @@ class MemoryOptimizedDataLoader:
                 # 嘗試使用 pyarrow 加載 Parquet 文件 (更快)
                 try:
                     import pyarrow.parquet as pq
-                    table = pq.read_table(binary_path)
+                    # 使用記憶體映射模式加載 Parquet 文件
+                    table = pq.read_table(binary_path, memory_map=True)
                     self.df = table.to_pandas()
-                    logger.info(f"使用 pyarrow 加載 Parquet 文件成功")
+                    logger.info(f"使用 pyarrow 記憶體映射模式加載 Parquet 文件成功")
                 except ImportError:
                     # 如果沒有 pyarrow，使用 pandas 加載
                     self.df = pd.read_parquet(binary_path)
@@ -267,86 +268,29 @@ class MemoryOptimizedDataLoader:
             # 嘗試使用更快的 CSV 解析器
             try:
                 import pyarrow.csv as pc
-                table = pc.read_csv(file_path)
+                # 使用更高效的 CSV 解析設置
+                parse_options = pc.ParseOptions(delimiter=',')
+                convert_options = pc.ConvertOptions(
+                    strings_to_categorical=True,
+                    include_columns=None,  # 包含所有列
+                    include_missing_columns=True
+                )
+                read_options = pc.ReadOptions(use_threads=True)
+                
+                table = pc.read_csv(file_path, 
+                                   parse_options=parse_options,
+                                   convert_options=convert_options,
+                                   read_options=read_options)
                 self.df = table.to_pandas()
-                logger.info(f"使用 pyarrow 加載 CSV 文件成功")
+                logger.info(f"使用 pyarrow 高效設置加載 CSV 文件成功")
             except ImportError:
                 # 如果沒有 pyarrow，使用 pandas 加載
                 self.df = pd.read_csv(file_path, low_memory=False)
                 logger.info(f"使用 pandas 加載 CSV 文件")
             
             logger.info(f"載入資料集形狀: {self.df.shape}")
-        else:
-            # 增加塊大小，減少加載次數
-            # 計算每塊的行數 (粗略估計)
-            rows_per_mb = 50000  # 增加每MB的行數估計
-            chunk_size = int(self.chunk_size_mb * rows_per_mb)
             
-            # 使用更大的塊大小
-            chunk_size = max(chunk_size, 500000)  # 至少 500,000 行
-            
-            logger.info(f"使用增大的塊大小: {chunk_size} 行")
-            
-            # 分塊讀取
-            chunks = []
-            total_chunks = 0
-            
-            # 嘗試使用 pyarrow 加載 (更快)
-            try:
-                import pyarrow.csv as pc
-                import pyarrow as pa
-                
-                # 估計總行數
-                with open(file_path, 'r') as f:
-                    for i, _ in enumerate(f):
-                        if i >= 10:  # 只讀取前10行來估計
-                            break
-                    avg_line_size = file_size * 1024 * 1024 / (i + 1)  # 平均每行大小 (bytes)
-                    estimated_lines = int(file_size * 1024 * 1024 / avg_line_size)
-                
-                # 計算分塊數量
-                num_chunks = (estimated_lines + chunk_size - 1) // chunk_size
-                
-                logger.info(f"估計總行數: {estimated_lines}，分塊數量: {num_chunks}")
-                
-                # 使用 pyarrow 分塊讀取
-                read_options = pc.ReadOptions(block_size=chunk_size * 1000)  # 增大塊大小
-                table_chunks = pc.read_csv(file_path, read_options=read_options)
-                
-                for i, chunk in enumerate(table_chunks):
-                    df_chunk = chunk.to_pandas()
-                    chunks.append(df_chunk)
-                    logger.info(f"已加載塊 {i+1}/{num_chunks}, 形狀: {df_chunk.shape}")
-                    total_chunks = i + 1
-                    
-                    # 定期清理記憶體
-                    if (i + 1) % 10 == 0:  # 減少清理頻率
-                        clean_memory()
-                
-                logger.info(f"使用 pyarrow 加載 CSV 文件成功")
-            except (ImportError, Exception) as e:
-                logger.warning(f"使用 pyarrow 加載失敗: {str(e)}，將使用 pandas 加載")
-                
-                # 使用 pandas 分塊讀取
-                for i, chunk in enumerate(pd.read_csv(file_path, chunksize=chunk_size, low_memory=False)):
-                    chunks.append(chunk)
-                    logger.info(f"已加載塊 {i+1}, 形狀: {chunk.shape}")
-                    total_chunks = i + 1
-                    
-                    # 定期清理記憶體
-                    if (i + 1) % 10 == 0:  # 減少清理頻率
-                        clean_memory()
-            
-            # 合併所有塊
-            logger.info(f"合併 {total_chunks} 個資料塊")
-            self.df = pd.concat(chunks, ignore_index=True)
-            logger.info(f"合併資料集形狀: {self.df.shape}")
-            
-            # 釋放記憶體
-            del chunks
-            clean_memory()
-            
-            # 保存為 Parquet 格式以加速未來加載
+            # 立即保存為 Parquet 格式以加速未來加載
             if self.save_preprocessed:
                 try:
                     logger.info(f"保存資料為 Parquet 格式: {binary_path}")
@@ -354,6 +298,113 @@ class MemoryOptimizedDataLoader:
                     logger.info(f"保存 Parquet 文件成功")
                 except Exception as e:
                     logger.warning(f"保存 Parquet 文件失敗: {str(e)}")
+            
+            return
+        
+        # 對於大文件，使用更高效的分塊策略
+        logger.info("使用極度優化的分塊策略加載大型 CSV 文件")
+        
+        # 直接轉換為 Parquet 格式，然後加載
+        try:
+            import pyarrow as pa
+            import pyarrow.csv as pc
+            import pyarrow.parquet as pq
+            
+            logger.info("使用 PyArrow 直接轉換 CSV 到 Parquet 格式")
+            
+            # 使用更高效的 CSV 解析設置
+            parse_options = pc.ParseOptions(delimiter=',')
+            convert_options = pc.ConvertOptions(
+                strings_to_categorical=True,
+                include_columns=None,  # 包含所有列
+                include_missing_columns=True
+            )
+            
+            # 使用更大的塊大小和多線程
+            read_options = pc.ReadOptions(
+                block_size=8 * 1024 * 1024,  # 8MB 塊大小
+                use_threads=True
+            )
+            
+            # 直接轉換 CSV 到 Parquet
+            logger.info("開始轉換 CSV 到 Parquet...")
+            table = pc.read_csv(file_path, 
+                               parse_options=parse_options,
+                               convert_options=convert_options,
+                               read_options=read_options)
+            
+            # 保存為 Parquet 格式
+            if self.save_preprocessed:
+                logger.info(f"保存轉換後的 Parquet 文件: {binary_path}")
+                pq.write_table(table, binary_path)
+            
+            # 轉換為 DataFrame
+            self.df = table.to_pandas()
+            logger.info(f"CSV 到 Parquet 轉換完成，資料形狀: {self.df.shape}")
+            
+            # 釋放記憶體
+            del table
+            clean_memory()
+            
+            return
+            
+        except (ImportError, Exception) as e:
+            logger.warning(f"使用 PyArrow 直接轉換失敗: {str(e)}，將使用傳統分塊加載")
+        
+        # 如果 PyArrow 方法失敗，使用傳統的 pandas 分塊加載
+        # 但使用更大的塊大小和更少的塊數
+        
+        # 計算更合理的塊大小
+        # 對於大型文件，使用固定的塊數而不是固定的塊大小
+        target_chunks = 10  # 目標塊數
+        estimated_rows_per_chunk = 1000000  # 每塊約 100 萬行
+        
+        # 嘗試估計總行數
+        try:
+            # 讀取前幾行來估計平均行大小
+            sample_size = 1000
+            sample_df = pd.read_csv(file_path, nrows=sample_size)
+            avg_row_size_bytes = sample_df.memory_usage(deep=True).sum() / len(sample_df)
+            estimated_total_rows = int((file_size * 1024 * 1024) / avg_row_size_bytes)
+            chunk_size = max(estimated_total_rows // target_chunks, estimated_rows_per_chunk)
+            logger.info(f"估計總行數: {estimated_total_rows}，使用塊大小: {chunk_size} 行")
+        except Exception as e:
+            logger.warning(f"行數估計失敗: {str(e)}，使用預設塊大小")
+            chunk_size = estimated_rows_per_chunk
+        
+        # 分塊讀取
+        chunks = []
+        total_chunks = 0
+        
+        # 使用 pandas 分塊讀取
+        logger.info(f"使用 pandas 分塊讀取，塊大小: {chunk_size} 行")
+        
+        for i, chunk in enumerate(pd.read_csv(file_path, chunksize=chunk_size, low_memory=False)):
+            chunks.append(chunk)
+            logger.info(f"已加載塊 {i+1}, 形狀: {chunk.shape}")
+            total_chunks = i + 1
+            
+            # 定期清理記憶體
+            if (i + 1) % 2 == 0:  # 每 2 個塊清理一次
+                clean_memory()
+        
+        # 合併所有塊
+        logger.info(f"合併 {total_chunks} 個資料塊")
+        self.df = pd.concat(chunks, ignore_index=True)
+        logger.info(f"合併資料集形狀: {self.df.shape}")
+        
+        # 釋放記憶體
+        del chunks
+        clean_memory()
+        
+        # 保存為 Parquet 格式以加速未來加載
+        if self.save_preprocessed:
+            try:
+                logger.info(f"保存資料為 Parquet 格式: {binary_path}")
+                self.df.to_parquet(binary_path, index=False)
+                logger.info(f"保存 Parquet 文件成功")
+            except Exception as e:
+                logger.warning(f"保存 Parquet 文件失敗: {str(e)}")
     
     def _load_data_at_once(self, file_list):
         """一次性加載所有文件"""
