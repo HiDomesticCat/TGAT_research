@@ -177,8 +177,8 @@ class MemoryOptimizedDataLoader:
         return self.df
     
     def _load_data_incrementally(self, file_list):
-        """增量式加載多個文件"""
-        logger.info(f"增量式加載 {len(file_list)} 個文件")
+        """增量式加載多個文件 - 多進程版本"""
+        logger.info(f"增量式加載 {len(file_list)} 個文件 (多進程版本)")
         
         # 估計每個文件的大小
         file_sizes = [os.path.getsize(f) / (1024 * 1024) for f in file_list]  # MB
@@ -186,52 +186,147 @@ class MemoryOptimizedDataLoader:
         
         logger.info(f"總資料大小: {total_size:.2f} MB")
         
-        # 根據塊大小計算每個文件要讀取的行數
-        chunks = []
+        # 使用多進程並行處理文件
+        import multiprocessing as mp
+        from concurrent.futures import ProcessPoolExecutor, as_completed
         
-        for i, file in enumerate(tqdm(file_list, desc="增量加載文件")):
-            file_size = file_sizes[i]
+        # 獲取可用的 CPU 核心數，保留 2 核心給系統
+        num_cores = max(1, mp.cpu_count() - 2)
+        logger.info(f"使用 {num_cores} 個 CPU 核心並行處理文件")
+        
+        # 定義單個文件處理函數
+        def process_file(file_info):
+            file_path, file_idx, total_files, file_size = file_info
             
-            # 如果文件小於塊大小，直接讀取整個文件
-            if file_size <= self.chunk_size_mb:
-                try:
-                    df_chunk = pd.read_csv(file, low_memory=False, dtype={
-                        'Protocol': 'category',
-                        'Destination Port': 'int32',
-                        'Flow Duration': 'float32'
-                    })
-                    chunks.append(df_chunk)
-                    logger.info(f"加載文件 {i+1}/{len(file_list)}: {file}, 形狀: {df_chunk.shape}")
-                except Exception as e:
-                    logger.error(f"載入 {file} 時發生錯誤: {str(e)}")
-            else:
-                # 分塊讀取大文件
-                chunk_reader = pd.read_csv(file, chunksize=int(self.chunk_size_mb * 10000 / file_size),
-                                         low_memory=False, dtype={
-                                             'Protocol': 'category',
-                                             'Destination Port': 'int32',
-                                             'Flow Duration': 'float32'
-                                         })
+            try:
+                # 檢查是否有預處理的 Parquet 文件
+                parquet_path = file_path.replace('.csv', '.parquet')
+                if os.path.exists(parquet_path) and self.save_preprocessed:
+                    # 使用 PyArrow 加載 Parquet 文件
+                    import pyarrow.parquet as pq
+                    table = pq.read_table(parquet_path, memory_map=True)
+                    df = table.to_pandas()
+                    return df, f"從 Parquet 加載文件 {file_idx+1}/{total_files}: {file_path}, 形狀: {df.shape}"
                 
-                for j, sub_chunk in enumerate(chunk_reader):
-                    chunks.append(sub_chunk)
-                    logger.info(f"加載文件 {i+1}/{len(file_list)} 塊 {j+1}: {file}, 形狀: {sub_chunk.shape}")
-                    
-                    # 定期清理記憶體
-                    if (j + 1) % 5 == 0:
-                        clean_memory()
+                # 如果文件小於塊大小，使用 PyArrow 直接讀取整個文件
+                if file_size <= self.chunk_size_mb:
+                    try:
+                        import pyarrow.csv as pc
+                        # 使用更高效的 CSV 解析設置
+                        parse_options = pc.ParseOptions(delimiter=',')
+                        convert_options = pc.ConvertOptions(
+                            strings_to_categorical=True,
+                            include_columns=None,
+                            include_missing_columns=True
+                        )
+                        read_options = pc.ReadOptions(use_threads=True)
+                        
+                        table = pc.read_csv(file_path, 
+                                          parse_options=parse_options,
+                                          convert_options=convert_options,
+                                          read_options=read_options)
+                        df = table.to_pandas()
+                        
+                        # 保存為 Parquet 格式以加速未來加載
+                        if self.save_preprocessed:
+                            import pyarrow.parquet as pq
+                            pq.write_table(table, parquet_path)
+                        
+                        return df, f"使用 PyArrow 加載文件 {file_idx+1}/{total_files}: {file_path}, 形狀: {df.shape}"
+                    except ImportError:
+                        # 如果沒有 PyArrow，使用 pandas 加載
+                        df = pd.read_csv(file_path, low_memory=False, dtype={
+                            'Protocol': 'category',
+                            'Destination Port': 'int32',
+                            'Flow Duration': 'float32'
+                        })
+                        return df, f"使用 pandas 加載文件 {file_idx+1}/{total_files}: {file_path}, 形狀: {df.shape}"
+                else:
+                    # 對於大文件，使用 PyArrow 直接轉換為 Parquet
+                    try:
+                        import pyarrow as pa
+                        import pyarrow.csv as pc
+                        import pyarrow.parquet as pq
+                        
+                        # 使用更高效的 CSV 解析設置
+                        parse_options = pc.ParseOptions(delimiter=',')
+                        convert_options = pc.ConvertOptions(
+                            strings_to_categorical=True,
+                            include_columns=None,
+                            include_missing_columns=True
+                        )
+                        
+                        # 使用更大的塊大小和多線程
+                        read_options = pc.ReadOptions(
+                            block_size=8 * 1024 * 1024,  # 8MB 塊大小
+                            use_threads=True
+                        )
+                        
+                        # 直接轉換 CSV 到 Parquet
+                        table = pc.read_csv(file_path, 
+                                          parse_options=parse_options,
+                                          convert_options=convert_options,
+                                          read_options=read_options)
+                        
+                        # 保存為 Parquet 格式
+                        if self.save_preprocessed:
+                            pq.write_table(table, parquet_path)
+                        
+                        # 轉換為 DataFrame
+                        df = table.to_pandas()
+                        return df, f"使用 PyArrow 直接轉換 CSV 到 Parquet: {file_path}, 形狀: {df.shape}"
+                    except (ImportError, Exception) as e:
+                        # 如果 PyArrow 方法失敗，使用 pandas 分塊加載
+                        # 計算更合理的塊大小
+                        target_chunks = 5  # 目標塊數
+                        sample_size = 1000
+                        sample_df = pd.read_csv(file_path, nrows=sample_size)
+                        avg_row_size_bytes = sample_df.memory_usage(deep=True).sum() / len(sample_df)
+                        estimated_total_rows = int((file_size * 1024 * 1024) / avg_row_size_bytes)
+                        chunk_size = max(estimated_total_rows // target_chunks, 100000)
+                        
+                        # 分塊讀取
+                        sub_chunks = []
+                        for chunk in pd.read_csv(file_path, chunksize=chunk_size, low_memory=False):
+                            sub_chunks.append(chunk)
+                        
+                        # 合併所有塊
+                        df = pd.concat(sub_chunks, ignore_index=True)
+                        return df, f"使用 pandas 分塊加載文件 {file_idx+1}/{total_files}: {file_path}, 形狀: {df.shape}"
+            except Exception as e:
+                return None, f"載入 {file_path} 時發生錯誤: {str(e)}"
+        
+        # 準備文件信息
+        file_infos = [(file, i, len(file_list), file_sizes[i]) for i, file in enumerate(file_list)]
+        
+        # 使用進程池並行處理文件
+        chunks = []
+        with ProcessPoolExecutor(max_workers=num_cores) as executor:
+            # 提交所有任務
+            future_to_file = {executor.submit(process_file, file_info): file_info for file_info in file_infos}
             
-            # 每處理完一個文件，清理記憶體
-            clean_memory()
+            # 處理結果
+            for future in tqdm(as_completed(future_to_file), total=len(file_infos), desc="並行處理文件"):
+                file_info = future_to_file[future]
+                try:
+                    df, message = future.result()
+                    if df is not None:
+                        chunks.append(df)
+                        logger.info(message)
+                except Exception as e:
+                    logger.error(f"處理文件 {file_info[0]} 時發生錯誤: {str(e)}")
         
         # 合併所有塊
-        logger.info(f"合併 {len(chunks)} 個資料塊")
-        self.df = pd.concat(chunks, ignore_index=True)
-        logger.info(f"合併資料集形狀: {self.df.shape}")
-        
-        # 釋放記憶體
-        del chunks
-        clean_memory()
+        if chunks:
+            logger.info(f"合併 {len(chunks)} 個資料塊")
+            self.df = pd.concat(chunks, ignore_index=True)
+            logger.info(f"合併資料集形狀: {self.df.shape}")
+            
+            # 釋放記憶體
+            del chunks
+            clean_memory()
+        else:
+            raise ValueError("未能成功加載任何文件")
     
     def _load_single_file_incrementally(self, file_path):
         """增量式加載單個文件 - 極度優化版本"""
