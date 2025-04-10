@@ -58,6 +58,10 @@ class MemoryOptimizedDataLoader:
                 - data.chunk_size_mb: 增量加載的塊大小 (MB)
                 - data.use_compression: 是否使用資料壓縮
                 - data.compression_format: 壓縮格式
+                - data.use_sampling: 是否使用資料採樣
+                - data.sampling_strategy: 採樣策略 ('random', 'stratified')
+                - data.sampling_ratio: 採樣比例 (0-1)
+                - data.min_samples_per_class: 每個類別的最小樣本數
         """
         # 從配置中提取資料相關設置
         data_config = config.get('data', {})
@@ -74,6 +78,12 @@ class MemoryOptimizedDataLoader:
         self.chunk_size_mb = data_config.get('chunk_size_mb', 100)
         self.use_compression = data_config.get('use_compression', True)
         self.compression_format = data_config.get('compression_format', 'gzip')
+        
+        # 資料採樣相關設置
+        self.use_sampling = data_config.get('use_sampling', False)
+        self.sampling_strategy = data_config.get('sampling_strategy', 'stratified')
+        self.sampling_ratio = data_config.get('sampling_ratio', 0.1)  # 默認採樣 10%
+        self.min_samples_per_class = data_config.get('min_samples_per_class', 1000)
         
         # 確保預處理資料目錄存在
         if self.save_preprocessed and not os.path.exists(self.preprocessed_path):
@@ -388,6 +398,10 @@ class MemoryOptimizedDataLoader:
             self.load_data()
 
         logger.info("開始資料預處理...")
+        
+        # 如果啟用了資料採樣，先進行採樣
+        if self.use_sampling and self.df is not None:
+            self._sample_data()
 
         # 清理列名，移除前後空格
         self.df.columns = [col.strip() for col in self.df.columns]
@@ -612,6 +626,111 @@ class MemoryOptimizedDataLoader:
         logger.info(f"預處理資料加載完成: 特徵形狀 {self.features.shape}, 標籤形狀 {self.target.shape}")
         
         return self.features, self.target
+    
+    def _sample_data(self):
+        """
+        對資料進行採樣，減少資料量
+        
+        支持兩種採樣策略：
+        1. random: 隨機採樣
+        2. stratified: 分層採樣，確保各類別的分布比例一致
+        """
+        if self.df is None or len(self.df) == 0:
+            logger.warning("資料為空，無法進行採樣")
+            return
+        
+        # 自動檢測標籤欄位
+        label_column = self._detect_label_column()
+        
+        # 獲取原始資料大小
+        original_size = len(self.df)
+        logger.info(f"原始資料大小: {original_size} 行")
+        
+        # 計算採樣後的目標大小
+        target_size = int(original_size * self.sampling_ratio)
+        logger.info(f"採樣比例: {self.sampling_ratio}, 目標大小: {target_size} 行")
+        
+        # 獲取類別分布
+        class_counts = self.df[label_column].value_counts()
+        logger.info(f"原始類別分布:\n{class_counts}")
+        
+        # 根據採樣策略進行採樣
+        if self.sampling_strategy == 'random':
+            # 隨機採樣
+            sampled_df = self.df.sample(n=target_size, random_state=self.random_state)
+            logger.info(f"隨機採樣完成，採樣後大小: {len(sampled_df)} 行")
+        
+        elif self.sampling_strategy == 'stratified':
+            # 分層採樣
+            logger.info("使用分層採樣策略")
+            
+            # 計算每個類別的採樣數量，確保至少有 min_samples_per_class 個樣本
+            class_sample_counts = {}
+            remaining_samples = target_size
+            
+            for class_label, count in class_counts.items():
+                # 計算比例採樣數量
+                proportional_count = int(count * self.sampling_ratio)
+                
+                # 確保至少有 min_samples_per_class 個樣本
+                sample_count = max(proportional_count, min(self.min_samples_per_class, count))
+                
+                # 如果原始數量小於最小樣本數，則全部保留
+                if count <= self.min_samples_per_class:
+                    sample_count = count
+                
+                class_sample_counts[class_label] = sample_count
+                remaining_samples -= sample_count
+            
+            # 如果還有剩餘樣本，按比例分配給各類別
+            if remaining_samples > 0:
+                total_remaining_count = sum([count for label, count in class_counts.items() 
+                                          if count > class_sample_counts[label]])
+                
+                if total_remaining_count > 0:
+                    for class_label, count in class_counts.items():
+                        if count > class_sample_counts[class_label]:
+                            # 按比例分配剩餘樣本
+                            extra_samples = int(remaining_samples * (count / total_remaining_count))
+                            class_sample_counts[class_label] += extra_samples
+                            remaining_samples -= extra_samples
+            
+            # 如果還有剩餘樣本，分配給最大的類別
+            if remaining_samples > 0:
+                largest_class = class_counts.idxmax()
+                class_sample_counts[largest_class] += remaining_samples
+            
+            # 進行分層採樣
+            sampled_dfs = []
+            for class_label, sample_count in class_sample_counts.items():
+                class_df = self.df[self.df[label_column] == class_label]
+                
+                # 如果樣本數大於類別總數，則全部保留
+                if sample_count >= len(class_df):
+                    sampled_class_df = class_df
+                else:
+                    sampled_class_df = class_df.sample(n=sample_count, random_state=self.random_state)
+                
+                sampled_dfs.append(sampled_class_df)
+                logger.info(f"類別 {class_label}: 原始 {len(class_df)} 行，採樣 {len(sampled_class_df)} 行")
+            
+            # 合併所有採樣後的資料
+            sampled_df = pd.concat(sampled_dfs, ignore_index=True)
+            logger.info(f"分層採樣完成，採樣後大小: {len(sampled_df)} 行")
+        
+        else:
+            logger.warning(f"不支持的採樣策略: {self.sampling_strategy}，使用隨機採樣")
+            sampled_df = self.df.sample(n=target_size, random_state=self.random_state)
+        
+        # 更新資料集
+        self.df = sampled_df
+        
+        # 顯示採樣後的類別分布
+        new_class_counts = self.df[label_column].value_counts()
+        logger.info(f"採樣後類別分布:\n{new_class_counts}")
+        
+        # 清理記憶體
+        clean_memory()
     
     def _detect_label_column(self):
         """自動檢測標籤欄位"""
