@@ -4,15 +4,15 @@ data:
   path: "./data"                  # 資料集路徑
   test_size: 0.3                  # 增加測試集比例以確保測試更全面
   random_state: 42                # 隨機種子
-  batch_size: 256                 # 提高批次大小以加快訓練
+  batch_size: 2560                # 提高批次大小以加快訓練
   
   # 記憶體優化相關配置
   use_memory_mapping: true        # 使用記憶體映射加速讀取
   save_preprocessed: true         # 保存預處理資料以便重用
   preprocessed_path: "./recode/preprocessed_data"
   incremental_loading: true       # 使用增量式加載減少記憶體使用
-  chunk_size_mb: 200              # 增加塊大小以減少I/O操作
-  use_compression: true           # 使用壓縮減少儲存空間
+  chunk_size_mb: 8000             # 增加塊大小以減少I/O操作
+  use_compression: false           # 使用壓縮減少儲存空間
   compression_format: "gzip"      # gzip提供良好的壓縮率與解壓速度平衡
   
   # 資料採樣相關配置
@@ -55,7 +55,7 @@ train:
   weight_decay: 5e-5              # 適度增加權重衰減防止過擬合
   epochs: 50                      # 減少訓練輪數以加快訓練
   patience: 5                     # 減少早停耐心值以避免過度訓練
-  batch_size: 256                 # 增加批次大小以加快訓練
+  batch_size: 1280                # 增加批次大小以加快訓練
   
   # 記憶體優化相關配置
   use_dynamic_batch_size: true    # 動態調整批次大小
