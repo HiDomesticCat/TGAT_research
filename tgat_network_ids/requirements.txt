@@ -21,3 +21,7 @@ seaborn>=0.12.0
 networkx>=3.1
 tqdm>=4.65.0
 attrs>=22.2.0
+
+# 資料加載優化相關依賴
+pyarrow>=10.0.0  # 用於高效的 CSV 和 Parquet 處理
+fastparquet>=2023.0.0  # 用於 Parquet 文件處理的替代庫
