@@ -4,44 +4,44 @@ data:
   path: "./data"                  # 資料集路徑
   test_size: 0.3                  # 增加測試集比例以確保測試更全面
   random_state: 42                # 隨機種子
-  batch_size: 1024                # 減少批次大小以避免記憶體溢出
+  batch_size: 256                 # 極度減少批次大小以避免記憶體溢出
   
-  # 記憶體優化相關配置
+  # 記憶體優化相關配置 - 極度保守設置
   use_memory_mapping: true        # 使用記憶體映射加速讀取
   save_preprocessed: true         # 保存預處理資料以便重用
   preprocessed_path: "./recode/preprocessed_data"
   incremental_loading: true       # 使用增量式加載減少記憶體使用
-  chunk_size_mb: 2000             # 減小塊大小以避免記憶體溢出
+  chunk_size_mb: 500              # 極度減小塊大小以避免記憶體溢出
   use_compression: true           # 啟用壓縮以減少記憶體使用
   compression_format: "gzip"      # gzip提供良好的壓縮率與解壓速度平衡
   
-  # 資料採樣相關配置
+  # 資料採樣相關配置 - 極度保守設置
   use_sampling: true              # 啟用資料採樣以減少資料量
   sampling_strategy: "stratified" # 使用分層採樣確保各類攻擊模式都有足夠表示
-  sampling_ratio: 0.1             # 降低採樣比例以減少記憶體使用 (使用10%的資料)
-  min_samples_per_class: 1000     # 減少每個類別的最小樣本數以節省記憶體
+  sampling_ratio: 0.05            # 極度降低採樣比例以減少記憶體使用 (使用5%的資料)
+  min_samples_per_class: 500      # 極度減少每個類別的最小樣本數以節省記憶體
 
-# 圖結構相關配置 - 針對 40GB RAM 優化
+# 圖結構相關配置 - 極度保守設置
 graph:
-  temporal_window: 300            # 縮短時間窗口以加快處理速度
+  temporal_window: 200            # 極度縮短時間窗口以加快處理速度
   
   # 記憶體優化相關配置
   use_subgraph_sampling: true     # 使用子圖採樣加速訓練
-  max_nodes_per_subgraph: 3000    # 減少子圖大小以避免記憶體溢出
-  max_edges_per_subgraph: 8000    # 減少子圖邊數以避免記憶體溢出
+  max_nodes_per_subgraph: 1000    # 極度減少子圖大小以避免記憶體溢出
+  max_edges_per_subgraph: 3000    # 極度減少子圖邊數以避免記憶體溢出
   use_sparse_representation: true # 使用稀疏表示節省記憶體
-  edge_batch_size: 8000           # 減少邊批次處理大小以避免記憶體溢出
+  edge_batch_size: 2000           # 極度減少邊批次處理大小以避免記憶體溢出
   prune_inactive_nodes: true      # 清理不活躍節點
-  inactive_threshold: 1200        # 降低閾值以更積極清理不活躍節點
+  inactive_threshold: 600         # 極度降低閾值以更積極清理不活躍節點
 
-# 模型相關配置
+# 模型相關配置 - 極度保守設置
 model:
-  hidden_dim: 64                  # 減少隱藏層維度以節省記憶體
-  out_dim: 64                     # 減少輸出維度以節省記憶體
-  time_dim: 16                    # 減少時間編碼維度以節省記憶體
-  num_layers: 2                   # 減少層數以節省記憶體
-  num_heads: 4                    # 減少注意力頭數以節省記憶體
-  dropout: 0.2                    # 增加丟棄率以減少過擬合風險
+  hidden_dim: 32                  # 極度減少隱藏層維度以節省記憶體
+  out_dim: 32                     # 極度減少輸出維度以節省記憶體
+  time_dim: 8                     # 極度減少時間編碼維度以節省記憶體
+  num_layers: 1                   # 極度減少層數以節省記憶體
+  num_heads: 2                    # 極度減少注意力頭數以節省記憶體
+  dropout: 0.3                    # 極度增加丟棄率以減少過擬合風險
   
   # 記憶體優化相關配置
   use_mixed_precision: true       # 使用混合精度加速訓練
@@ -49,20 +49,20 @@ model:
   gradient_accumulation_steps: 2  # 減少梯度累積步數以加快訓練
   use_gradient_checkpointing: true
 
-# 訓練相關配置 - 針對 40GB RAM 和 8核 CPU 優化
+# 訓練相關配置 - 極度保守設置
 train:
-  lr: 0.002                       # 略微提高學習率以加快收斂
-  weight_decay: 5e-5              # 適度增加權重衰減防止過擬合
-  epochs: 50                      # 減少訓練輪數以加快訓練
-  patience: 5                     # 減少早停耐心值以避免過度訓練
-  batch_size: 1024                # 減少批次大小以避免記憶體溢出
+  lr: 0.003                       # 提高學習率以加快收斂
+  weight_decay: 1e-4              # 增加權重衰減防止過擬合
+  epochs: 30                      # 極度減少訓練輪數以加快訓練
+  patience: 3                     # 極度減少早停耐心值以避免過度訓練
+  batch_size: 512                 # 極度減少批次大小以避免記憶體溢出
   
   # 記憶體優化相關配置
   use_dynamic_batch_size: true    # 動態調整批次大小
-  memory_threshold: 0.75          # 降低記憶體閾值以避免過度使用記憶體
+  memory_threshold: 0.6           # 極度降低記憶體閾值以避免過度使用記憶體
   use_progressive_training: true  # 使用漸進式訓練
-  progressive_training_initial_ratio: 0.5  # 提高初始比例以利用大記憶體
-  progressive_training_growth_rate: 0.2    # 增加成長率以更快達到全量訓練
+  progressive_training_initial_ratio: 0.3  # 降低初始比例以減少記憶體使用
+  progressive_training_growth_rate: 0.1    # 減少成長率以避免記憶體使用峰值
 
 # 檢測相關配置
 detection:

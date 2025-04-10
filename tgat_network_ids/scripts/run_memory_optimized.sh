@@ -16,8 +16,8 @@ export PYTHONMALLOC=malloc
 export PYTHONMALLOCSTATS=1
 export PYTHONGC=1
 
-# 設置 CUDA 記憶體分配器 - 更保守的設置
-export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:64,garbage_collection_threshold:0.6
+# 設置 CUDA 記憶體分配器 - 極度保守設置
+export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:32,garbage_collection_threshold:0.5
 
 # 設置 CUDA 緩存大小 (限制為 10GB，適合 40GB RAM)
 export CUDA_CACHE_MAXSIZE=10737418240
