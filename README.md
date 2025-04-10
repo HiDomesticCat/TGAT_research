@@ -65,6 +65,43 @@ python TGAT_research/tgat_network_ids/scripts/run.py \
   --visualize
 ```
 
+### 使用資料採樣功能
+
+系統現在支持資料採樣功能，可以大幅減少訓練時間和記憶體使用量，同時保持模型性能。
+
+#### 啟用分層採樣
+
+分層採樣確保各類攻擊模式都有足夠的表示，即使在大幅減少資料量的情況下也能保持模型性能。
+
+```yaml
+# 在 config/memory_optimized_config.yaml 中設置
+data:
+  use_sampling: true              # 啟用資料採樣
+  sampling_strategy: "stratified" # 使用分層採樣
+  sampling_ratio: 0.1             # 使用10%的資料
+  min_samples_per_class: 1000     # 每個類別至少保留1000個樣本
+```
+
+#### 使用隨機採樣
+
+如果只需要快速測試系統功能，可以使用隨機採樣：
+
+```yaml
+data:
+  use_sampling: true
+  sampling_strategy: "random"     # 使用隨機採樣
+  sampling_ratio: 0.05            # 使用5%的資料
+```
+
+#### 禁用採樣
+
+如果需要使用全量資料進行訓練：
+
+```yaml
+data:
+  use_sampling: false             # 禁用採樣，使用全量資料
+```
+
 ## 配置
 
 系統可通過 YAML 配置文件進行高度自定義。主要配置文件位於 `TGAT_research/tgat_network_ids/config/memory_optimized_config.yaml`。
@@ -165,45 +202,55 @@ TGAT_research/
 
 本實現包括多種記憶體優化技術：
 
-1. **增量式數據加載**：分塊加載數據以減少記憶體使用
+1. **資料採樣**：減少訓練資料量同時保持模型性能
+   - 使用 `stratified` 分層採樣確保各類攻擊模式都有足夠表示
+   - 使用 `random` 隨機採樣快速測試系統功能
+   - 可配置採樣比例和每個類別的最小樣本數
+
+2. **高效資料格式**：使用更高效的文件格式加速資料加載
+   - 自動將 CSV 轉換為 Parquet 格式並緩存
+   - 使用 PyArrow 加速 CSV 和 Parquet 處理
+   - 支持增量式資料加載和處理
+
+3. **增量式數據加載**：分塊加載數據以減少記憶體使用
    - 使用 `load_dataframe_chunked` 分批讀取大型 CSV 文件
    - 使用 `save_dataframe_chunked` 分批保存大型 DataFrame
 
-2. **記憶體映射大型數據集**：對大型數據集使用記憶體映射
+4. **記憶體映射大型數據集**：對大型數據集使用記憶體映射
    - 使用 `memory_mapped_array` 創建記憶體映射數組
    - 使用 `load_memory_mapped_array` 加載已存在的記憶體映射
 
-3. **子圖採樣**：對訓練採樣子圖以減少記憶體使用
+5. **子圖採樣**：對訓練採樣子圖以減少記憶體使用
    - 限制子圖的節點和邊數量
    - 動態調整採樣率
 
-4. **混合精度訓練**：使用較低精度進行訓練以減少記憶體使用
+6. **混合精度訓練**：使用較低精度進行訓練以減少記憶體使用
    - 使用 PyTorch 的 AMP (Automatic Mixed Precision)
    - 自動處理精度轉換和梯度縮放
 
-5. **梯度累積**：在多個批次上累積梯度
+7. **梯度累積**：在多個批次上累積梯度
    - 允許使用更小的批次大小
    - 保持大批次訓練的效果
 
-6. **動態批次大小**：根據可用記憶體調整批次大小
+8. **動態批次大小**：根據可用記憶體調整批次大小
    - 使用 `adaptive_batch_size` 根據當前記憶體使用率調整批次大小
    - 設置記憶體使用閾值和最小批次大小
 
-7. **主動記憶體管理**：在訓練期間主動管理記憶體使用
+9. **主動記憶體管理**：在訓練期間主動管理記憶體使用
    - 使用 `clean_memory` 定期清理未使用的記憶體
    - 使用 `print_memory_usage` 監控記憶體使用情況
    - 使用 `MemoryMonitor` 類持續監控和記錄記憶體使用
 
-8. **DataFrame 記憶體優化**：減少 DataFrame 的記憶體佔用
-   - 使用 `optimize_dataframe_memory` 自動選擇最佳數據類型
-   - 將高基數列轉換為分類類型
-   - 將浮點數列轉換為較低精度
+10. **DataFrame 記憶體優化**：減少 DataFrame 的記憶體佔用
+    - 使用 `optimize_dataframe_memory` 自動選擇最佳數據類型
+    - 將高基數列轉換為分類類型
+    - 將浮點數列轉換為較低精度
 
-9. **記憶體洩漏檢測**：識別和修復記憶體洩漏
-   - 使用 `detect_memory_leaks` 檢測函數中的記憶體洩漏
-   - 提供詳細的洩漏源信息
+11. **記憶體洩漏檢測**：識別和修復記憶體洩漏
+    - 使用 `detect_memory_leaks` 檢測函數中的記憶體洩漏
+    - 提供詳細的洩漏源信息
 
-10. **記憶體優化建議**：提供自動化記憶體優化建議
+12. **記憶體優化建議**：提供自動化記憶體優化建議
     - 使用 `print_optimization_suggestions` 獲取針對當前系統狀態的優化建議
     - 根據 CPU 和 GPU 記憶體使用情況提供不同建議
 
