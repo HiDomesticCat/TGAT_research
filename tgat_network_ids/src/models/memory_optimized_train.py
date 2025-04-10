@@ -227,14 +227,33 @@ class MemoryOptimizedTGATTrainer:
         # 清空梯度
         self.optimizer.zero_grad()
         
-        # 使用 tqdm 顯示進度條
-        progress_bar = tqdm(range(num_batches), desc=f"Epoch {epoch+1}")
+        # 創建 DataLoader 以提高並行效率
+        from torch.utils.data import TensorDataset, DataLoader
         
-        for batch_idx in progress_bar:
+        # 準備數據集
+        node_indices = torch.arange(num_nodes, device=self.device)
+        dataset = TensorDataset(node_indices)
+        
+        # 使用 DataLoader 提高並行效率
+        # 使用 num_workers=4 (保留 4 核心給系統)
+        # 使用 pin_memory 加速 GPU 傳輸
+        # 使用 prefetch_factor 預取數據
+        dataloader = DataLoader(
+            dataset, 
+            batch_size=batch_size,
+            shuffle=True,
+            num_workers=4 if self.device != 'cpu' else 0,  # CPU 模式下不使用多線程
+            pin_memory=self.device != 'cpu',  # GPU 模式下使用 pin_memory
+            prefetch_factor=2 if self.device != 'cpu' else None,  # 預取 2 個批次
+            persistent_workers=True if self.device != 'cpu' else False  # 保持工作線程存活
+        )
+        
+        # 使用 tqdm 顯示進度條
+        progress_bar = tqdm(dataloader, desc=f"Epoch {epoch+1}")
+        
+        for batch_indices_tensor in progress_bar:
             # 獲取批次索引
-            start_idx = batch_idx * batch_size
-            end_idx = min((batch_idx + 1) * batch_size, num_nodes)
-            batch_indices = torch.arange(start_idx, end_idx, device=self.device)
+            batch_indices = batch_indices_tensor[0]
             
             # 獲取批次子圖
             batch_subgraph = dgl.node_subgraph(subgraph, batch_indices)
