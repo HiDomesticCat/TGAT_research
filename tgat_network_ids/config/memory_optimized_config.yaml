@@ -14,6 +14,12 @@ data:
   chunk_size_mb: 200              # 增加塊大小以減少I/O操作
   use_compression: true           # 使用壓縮減少儲存空間
   compression_format: "gzip"      # gzip提供良好的壓縮率與解壓速度平衡
+  
+  # 資料採樣相關配置
+  use_sampling: true              # 啟用資料採樣以減少資料量
+  sampling_strategy: "stratified" # 使用分層採樣確保各類攻擊模式都有足夠表示
+  sampling_ratio: 0.1             # 採樣比例 (使用10%的資料)
+  min_samples_per_class: 1000     # 每個類別的最小樣本數
 
 # 圖結構相關配置
 graph:
