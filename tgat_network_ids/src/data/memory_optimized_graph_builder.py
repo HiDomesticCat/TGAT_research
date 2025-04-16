@@ -189,78 +189,95 @@ class MemoryOptimizedDynamicNetworkGraph:
             self._prune_inactive_nodes()
     
     def _prune_inactive_nodes(self):
-        """清理不活躍節點"""
+        """高效清理不活躍節點"""
         if not self.prune_inactive_nodes:
             return
         
+        # 檢查上次清理時間，避免頻繁清理
         current_time = time.time()
-        inactive_nodes = []
-        
+        if current_time - self.last_pruning_time < 600:  # 至少10分鐘才清理一次
+            return
+            
         # 找出不活躍節點
+        inactive_nodes = []
         for nid, last_active in self.node_last_active.items():
             if current_time - last_active > self.inactive_threshold:
                 inactive_nodes.append(nid)
         
-        if not inactive_nodes:
+        # 如果沒有不活躍節點或不活躍節點比例過低，不清理
+        inactive_ratio = len(inactive_nodes) / max(1, len(self.existing_nodes))
+        if not inactive_nodes or inactive_ratio < 0.1:  # 不活躍節點少於10%時不清理
+            self.last_pruning_time = current_time  # 仍更新清理時間
             return
         
-        logger.info(f"清理 {len(inactive_nodes)} 個不活躍節點")
+        logger.info(f"清理 {len(inactive_nodes)} 個不活躍節點 (佔比 {inactive_ratio:.1%})")
         
-        # 從圖中移除不活躍節點
-        # 注意：DGL 不支持直接移除節點，需要創建一個新圖
+        # 獲取活躍節點集合
         active_nodes = list(self.existing_nodes - set(inactive_nodes))
+        active_nodes_set = set(active_nodes)
         
-        # 創建一個新圖，只包含活躍節點
+        # 檢查活躍邊 - 只保留連接兩個活躍節點的邊
+        active_edges = []
+        for src, dst in self.existing_edges:
+            if src in active_nodes_set and dst in active_nodes_set:
+                active_edges.append((src, dst))
+        
+        # 建立高效的節點ID映射 - 使用連續的整數索引
+        node_map = {old_id: new_id for new_id, old_id in enumerate(active_nodes)}
+        
+        # 創建新圖但不立即添加所有邊
         new_g = dgl.graph(([],  # 源節點
-                           []),  # 目標節點
-                          num_nodes=len(active_nodes),
-                          idtype=torch.int64,
-                          device='cpu')
+                          []),  # 目標節點
+                         num_nodes=len(active_nodes),
+                         idtype=torch.int64,
+                         device='cpu')
         
-        # 更新節點映射
-        node_map = {nid: i for i, nid in enumerate(active_nodes)}
+        # 批量添加邊以提高效率
+        if active_edges:
+            # 將原始節點ID映射到新的連續節點ID
+            new_src = [node_map[e[0]] for e in active_edges]
+            new_dst = [node_map[e[1]] for e in active_edges]
+            
+            # 批量添加邊
+            new_g.add_edges(new_src, new_dst)
         
-        # 更新邊
-        new_edges = []
-        for (src, dst) in self.existing_edges:
-            if src in active_nodes and dst in active_nodes:
-                new_edges.append((node_map[src], node_map[dst]))
-        
-        if new_edges:
-            src_nodes, dst_nodes = zip(*new_edges)
-            new_g.add_edges(src_nodes, dst_nodes)
-        
-        # 更新節點特徵、時間戳記和標籤
+        # 高效更新節點特徵和相關數據 - 使用批處理而非逐個處理
+        # 只遍歷一次活躍節點列表
         new_node_features = {}
         new_node_timestamps = {}
         new_node_labels = {}
         new_node_last_active = {}
-        
-        for nid in active_nodes:
-            new_nid = node_map[nid]
-            new_node_features[new_nid] = self.node_features[nid]
-            new_node_timestamps[new_nid] = self.node_timestamps[nid]
-            if nid in self.node_labels:
-                new_node_labels[new_nid] = self.node_labels[nid]
-            new_node_last_active[new_nid] = self.node_last_active[nid]
-        
-        # 更新邊特徵和時間戳記
         new_edge_features = {}
         new_edge_timestamps = {}
         new_existing_edges = set()
         
-        for i, (src, dst) in enumerate(new_edges):
-            old_src = active_nodes[src]
-            old_dst = active_nodes[dst]
+        # 節點數據轉換
+        for old_id in active_nodes:
+            new_id = node_map[old_id]
+            if old_id in self.node_features:
+                new_node_features[new_id] = self.node_features[old_id]
+            if old_id in self.node_timestamps:
+                new_node_timestamps[new_id] = self.node_timestamps[old_id]
+            if old_id in self.node_labels:
+                new_node_labels[new_id] = self.node_labels[old_id]
+            if old_id in self.node_last_active:
+                new_node_last_active[new_id] = self.node_last_active[old_id]
+        
+        # 邊數據轉換 - 直接使用映射後的邊
+        for i, (old_src, old_dst) in enumerate(active_edges):
+            new_src = node_map[old_src]
+            new_dst = node_map[old_dst]
+            new_edge = (new_src, new_dst)
             old_edge = (old_src, old_dst)
             
             if old_edge in self.edge_features:
-                new_edge = (src, dst)
                 new_edge_features[new_edge] = self.edge_features[old_edge]
+            if old_edge in self.edge_timestamps:
                 new_edge_timestamps[new_edge] = self.edge_timestamps[old_edge]
-                new_existing_edges.add(new_edge)
+                
+            new_existing_edges.add(new_edge)
         
-        # 更新圖和相關數據結構
+        # 批量更新所有數據結構
         self.g = new_g
         self.node_features = new_node_features
         self.node_timestamps = new_node_timestamps
@@ -271,10 +288,11 @@ class MemoryOptimizedDynamicNetworkGraph:
         self.existing_edges = new_existing_edges
         self.existing_nodes = set(active_nodes)
         
-        # 更新源到目標的映射
+        # 高效重建源到目標的映射
         self.src_to_dst = defaultdict(set)
         self.dst_to_src = defaultdict(set)
         
+        # 一次遍歷處理所有新邊
         for (src, dst) in self.existing_edges:
             self.src_to_dst[src].add(dst)
             self.dst_to_src[dst].add(src)
@@ -282,7 +300,7 @@ class MemoryOptimizedDynamicNetworkGraph:
         # 更新最後清理時間
         self.last_pruning_time = current_time
         
-        # 強制執行垃圾回收
+        # 清理記憶體
         clean_memory()
         
         logger.info(f"清理完成，當前共 {len(self.existing_nodes)} 個節點，{len(self.existing_edges)} 條邊")

@@ -311,14 +311,18 @@ class MemoryOptimizedTGATTrainer:
             total_loss += loss.item() * (self.gradient_accumulation_steps if self.use_gradient_accumulation else 1)
             total_correct += correct
             
+            # 獲取當前批次索引
+            batch_idx = progress_bar.n - 1
+            batch_end_idx = batch_indices.shape[0]
+            
             # 更新進度條
             progress_bar.set_postfix({
-                'loss': total_loss / (batch_idx + 1),
-                'acc': total_correct / (end_idx)
+                'loss': total_loss / (batch_idx + 1) if batch_idx >= 0 else 0,
+                'acc': total_correct / num_nodes if num_nodes > 0 else 0
             })
             
-            # 定期清理記憶體
-            if batch_idx % 10 == 0:
+            # 減少記憶體清理頻率
+            if batch_idx % 30 == 0:
                 clean_memory()
         
         # 計算平均損失和精度

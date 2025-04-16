@@ -41,26 +41,53 @@ class TimeEncoding(nn.Module):
         super(TimeEncoding, self).__init__()
         self.dimension = dimension
         
-        # Initialize weights and biases
+        # 初始化權重和偏置
         self.w = nn.Linear(1, dimension, bias=True)
         
-        # Use Xavier initialization for weights
+        # 使用Xavier初始化權重
         nn.init.xavier_uniform_(self.w.weight)
         nn.init.zeros_(self.w.bias)
+        
+        # 時間編碼緩存
+        self.cache = {}
+        self.cache_size_limit = 10000  # 緩存大小限制
     
     def forward(self, t):
-        # Ensure input is float and 2D
+        # 將輸入轉換為浮點數並確保二維
         t = t.float()
         if t.dim() == 1:
             t = t.unsqueeze(1)
         
-        # Ensure weights are also float
-        self.w.weight = nn.Parameter(self.w.weight.float())
-        self.w.bias = nn.Parameter(self.w.bias.float())
+        # 使用緩存加速時間編碼計算
+        batch_size = t.size(0)
+        device_key = str(t.device)
         
-        # Use cosine function for encoding
-        output = torch.cos(self.w(t))
-        return output
+        # 重置過大的緩存以避免記憶體洩漏
+        if len(self.cache) > self.cache_size_limit:
+            self.cache = {}
+            
+        # 批次處理：將每個時間戳檢查緩存，未命中時計算
+        outputs = []
+        for i in range(batch_size):
+            time_val = t[i].item()  # 獲取單個時間戳值
+            cache_key = f"{device_key}_{time_val:.5f}"  # 生成緩存鍵，限制精度避免過多緩存項
+            
+            if cache_key in self.cache:
+                # 緩存命中
+                output_i = self.cache[cache_key]
+            else:
+                # 緩存未命中，計算編碼
+                time_tensor = t[i].view(1, 1)
+                output_i = torch.cos(self.w(time_tensor)).squeeze(0)
+                self.cache[cache_key] = output_i
+            
+            outputs.append(output_i)
+        
+        # 將所有編碼合併為一個批次
+        if outputs:
+            return torch.stack(outputs)
+        else:
+            return torch.empty((0, self.dimension), device=t.device)
 
 class TemporalGATLayer(nn.Module):
     """時間圖注意力層（記憶體優化版）"""

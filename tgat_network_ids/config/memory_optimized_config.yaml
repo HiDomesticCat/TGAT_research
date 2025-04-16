@@ -1,76 +1,76 @@
 # 記憶體優化版 TGAT 網路攻擊檢測系統配置文件 - 快速高準確率版本
-# 資料相關配置 - 針對 40GB RAM 優化
+# 資料相關配置 - 平衡記憶體使用和效率的設置
 data:
   path: "./data"                  # 資料集路徑
-  test_size: 0.3                  # 增加測試集比例以確保測試更全面
+  test_size: 0.3                  # 測試集比例
   random_state: 42                # 隨機種子
-  batch_size: 256                 # 極度減少批次大小以避免記憶體溢出
+  batch_size: 512                 # 使用較大的批次大小提高效率
   
-  # 記憶體優化相關配置 - 極度保守設置
+  # 記憶體優化相關配置 - 平衡設置
   use_memory_mapping: true        # 使用記憶體映射加速讀取
   save_preprocessed: true         # 保存預處理資料以便重用
   preprocessed_path: "./recode/preprocessed_data"
   incremental_loading: true       # 使用增量式加載減少記憶體使用
-  chunk_size_mb: 500              # 極度減小塊大小以避免記憶體溢出
+  chunk_size_mb: 1024             # 增加塊大小以減少磁碟IO次數
   use_compression: true           # 啟用壓縮以減少記憶體使用
   compression_format: "gzip"      # gzip提供良好的壓縮率與解壓速度平衡
   
-  # 資料採樣相關配置 - 極度保守設置
+  # 資料採樣相關配置 - 更高效的設置
   use_sampling: true              # 啟用資料採樣以減少資料量
   sampling_strategy: "stratified" # 使用分層採樣確保各類攻擊模式都有足夠表示
-  sampling_ratio: 0.05            # 極度降低採樣比例以減少記憶體使用 (使用5%的資料)
-  min_samples_per_class: 500      # 極度減少每個類別的最小樣本數以節省記憶體
+  sampling_ratio: 0.1             # 使用更多資料提高模型準確度 (使用10%的資料)
+  min_samples_per_class: 1000     # 確保每個類別有足夠的樣本
 
-# 圖結構相關配置 - 極度保守設置
+# 圖結構相關配置 - 效能優化設置
 graph:
-  temporal_window: 200            # 極度縮短時間窗口以加快處理速度
+  temporal_window: 300            # 使用更合理的時間窗口
   
   # 記憶體優化相關配置
   use_subgraph_sampling: true     # 使用子圖採樣加速訓練
-  max_nodes_per_subgraph: 1000    # 極度減少子圖大小以避免記憶體溢出
-  max_edges_per_subgraph: 3000    # 極度減少子圖邊數以避免記憶體溢出
+  max_nodes_per_subgraph: 5000    # 增加子圖大小提高模型效果
+  max_edges_per_subgraph: 10000   # 增加子圖邊數提高模型效果
   use_sparse_representation: true # 使用稀疏表示節省記憶體
-  edge_batch_size: 2000           # 極度減少邊批次處理大小以避免記憶體溢出
+  edge_batch_size: 5000           # 增加邊批次處理大小提高效率
   prune_inactive_nodes: true      # 清理不活躍節點
-  inactive_threshold: 600         # 極度降低閾值以更積極清理不活躍節點
+  inactive_threshold: 1800        # 使用更合理的不活躍閾值減少圖重建次數 (30分鐘)
 
-# 模型相關配置 - 極度保守設置
+# 模型相關配置 - 平衡效能和記憶體的設置
 model:
-  hidden_dim: 32                  # 極度減少隱藏層維度以節省記憶體
-  out_dim: 32                     # 極度減少輸出維度以節省記憶體
-  time_dim: 8                     # 極度減少時間編碼維度以節省記憶體
-  num_layers: 1                   # 極度減少層數以節省記憶體
-  num_heads: 2                    # 極度減少注意力頭數以節省記憶體
-  dropout: 0.3                    # 極度增加丟棄率以減少過擬合風險
+  hidden_dim: 64                  # 增加隱藏層維度提高模型表現
+  out_dim: 64                     # 增加輸出維度提高模型表現
+  time_dim: 16                    # 增加時間編碼維度提高時間特徵表示
+  num_layers: 2                   # 使用更合適的層數平衡效能和複雜度
+  num_heads: 4                    # 增加注意力頭數提高特徵學習能力
+  dropout: 0.2                    # 調整丟棄率更好地平衡正則化
   
   # 記憶體優化相關配置
   use_mixed_precision: true       # 使用混合精度加速訓練
   use_gradient_accumulation: true
-  gradient_accumulation_steps: 2  # 減少梯度累積步數以加快訓練
-  use_gradient_checkpointing: true
+  gradient_accumulation_steps: 4  # 使用合適的梯度累積步數
+  use_gradient_checkpointing: false # 禁用梯度檢查點提高訓練速度
 
-# 訓練相關配置 - 極度保守設置
+# 訓練相關配置 - 效能優化設置
 train:
-  lr: 0.003                       # 提高學習率以加快收斂
-  weight_decay: 1e-4              # 增加權重衰減防止過擬合
-  epochs: 30                      # 極度減少訓練輪數以加快訓練
-  patience: 3                     # 極度減少早停耐心值以避免過度訓練
-  batch_size: 512                 # 極度減少批次大小以避免記憶體溢出
+  lr: 0.002                       # 適當調整學習率平衡收斂速度和穩定性
+  weight_decay: 5e-5              # 調整權重衰減平衡正則化效果
+  epochs: 50                      # 增加訓練輪數提高模型表現
+  patience: 5                     # 增加早停耐心值避免過早停止
+  batch_size: 1024                # 增加批次大小提高訓練效率
   
   # 記憶體優化相關配置
   use_dynamic_batch_size: true    # 動態調整批次大小
-  memory_threshold: 0.6           # 極度降低記憶體閾值以避免過度使用記憶體
+  memory_threshold: 0.8           # 提高記憶體閾值減少批次大小調整頻率
   use_progressive_training: true  # 使用漸進式訓練
-  progressive_training_initial_ratio: 0.3  # 降低初始比例以減少記憶體使用
-  progressive_training_growth_rate: 0.1    # 減少成長率以避免記憶體使用峰值
+  progressive_training_initial_ratio: 0.5  # 提高初始比例加速訓練
+  progressive_training_growth_rate: 0.2    # 增加成長率加速訓練
 
 # 檢測相關配置
 detection:
-  threshold: 0.65                 # 降低檢測閾值以提高靈敏度
-  window_size: 40                 # 減少窗口大小以加快反應
+  threshold: 0.65                 # 保持檢測閾值
+  window_size: 60                 # 增加窗口大小提高準確性
   use_sliding_window: true        # 使用滑動窗口
-  sliding_window_size: 80         # 減少滑動窗口以加快處理
-  sliding_window_step: 40         # 減少步長以提高檢測精度
+  sliding_window_size: 120        # 增加滑動窗口提高準確性
+  sliding_window_step: 40         # 保持步長平衡效率和準確性
 
 # 輸出相關配置
 output:
@@ -80,16 +80,16 @@ output:
   memory_report_dir: "./recode/memory_reports_fast" # 記憶體報告路徑
   checkpoint_dir: "./recode/checkpoints_fast"       # 檢查點儲存路徑
 
-# 系統相關配置 - 針對 8核 CPU 優化
+# 系統相關配置 - 效能優化設置
 system:
   seed: 42                        # 隨機種子
   device: "cuda"                  # 使用GPU加速
   gpu_id: 0                       # GPU ID
-  num_workers: 6                  # 減少工作線程數以避免CPU滿載 (保留2核心給系統)
+  num_workers: 8                  # 增加工作線程數提高並行處理能力
   pin_memory: true                # 使用固定記憶體加速GPU傳輸
   
   # 記憶體優化相關配置
-  monitor_memory: true            # 監控記憶體使用
-  memory_monitor_interval: 60     # 增加監控間隔以減少CPU負載
-  clean_memory_interval: 5        # 減少清理頻率以減少CPU負載
+  monitor_memory: false           # 關閉持續記憶體監控減少系統開銷
+  memory_monitor_interval: 300    # 大幅增加監控間隔減少CPU負載
+  clean_memory_interval: 30       # 增加清理間隔減少垃圾回收開銷
   limit_gpu_memory: 0             # 不限制GPU記憶體以充分利用資源
