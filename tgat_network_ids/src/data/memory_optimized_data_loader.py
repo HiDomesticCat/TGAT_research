@@ -177,156 +177,261 @@ class MemoryOptimizedDataLoader:
         return self.df
     
     def _load_data_incrementally(self, file_list):
-        """增量式加載多個文件 - 多進程版本"""
-        logger.info(f"增量式加載 {len(file_list)} 個文件 (多進程版本)")
+        """增量式加載多個文件 - 串流處理版本"""
+        logger.info(f"增量式加載 {len(file_list)} 個文件 (串流處理版本)")
         
-        # 估計每個文件的大小
-        file_sizes = [os.path.getsize(f) / (1024 * 1024) for f in file_list]  # MB
-        total_size = sum(file_sizes)
+        # 轉換所有文件為Parquet格式（如果需要）
+        self._ensure_parquet_files(file_list)
         
-        logger.info(f"總資料大小: {total_size:.2f} MB")
-        
-        # 使用多進程並行處理文件
+        # 使用Parquet格式直接載入和處理資料
+        self._process_parquet_files(file_list)
+    
+    def _ensure_parquet_files(self, file_list):
+        """確保所有CSV文件都有對應的Parquet版本"""
         import multiprocessing as mp
         from concurrent.futures import ProcessPoolExecutor, as_completed
         
-        # 獲取可用的 CPU 核心數，保留 2 核心給系統
-        num_cores = max(1, mp.cpu_count() - 2)
-        logger.info(f"使用 {num_cores} 個 CPU 核心並行處理文件")
+        # 獲取需要轉換的文件列表（沒有對應parquet文件的csv文件）
+        conversion_needed = []
+        for csv_file in file_list:
+            parquet_file = csv_file.replace('.csv', '.parquet')
+            if not os.path.exists(parquet_file) and self.save_preprocessed:
+                conversion_needed.append(csv_file)
         
-        # 定義單個文件處理函數
-        def process_file(file_info):
-            file_path, file_idx, total_files, file_size = file_info
+        if not conversion_needed:
+            logger.info("所有文件已有Parquet格式，無需轉換")
+            return
             
+        # 獲取可用的CPU核心數，保留2核心給系統
+        num_cores = max(1, mp.cpu_count() - 2)
+        logger.info(f"使用{num_cores}個核心轉換{len(conversion_needed)}個文件為Parquet格式")
+        
+        # 轉換函數：將CSV轉為Parquet
+        def convert_to_parquet(file_path):
+            parquet_path = file_path.replace('.csv', '.parquet')
             try:
-                # 檢查是否有預處理的 Parquet 文件
-                parquet_path = file_path.replace('.csv', '.parquet')
-                if os.path.exists(parquet_path) and self.save_preprocessed:
-                    # 使用 PyArrow 加載 Parquet 文件
+                # 使用PyArrow直接轉換（更快且記憶體效率更高）
+                try:
+                    import pyarrow as pa
+                    import pyarrow.csv as pc
                     import pyarrow.parquet as pq
-                    table = pq.read_table(parquet_path, memory_map=True)
-                    df = table.to_pandas()
-                    return df, f"從 Parquet 加載文件 {file_idx+1}/{total_files}: {file_path}, 形狀: {df.shape}"
-                
-                # 如果文件小於塊大小，使用 PyArrow 直接讀取整個文件
-                if file_size <= self.chunk_size_mb:
-                    try:
-                        import pyarrow.csv as pc
-                        # 使用更高效的 CSV 解析設置
-                        parse_options = pc.ParseOptions(delimiter=',')
-                        convert_options = pc.ConvertOptions(
-                            strings_to_categorical=True,
-                            include_columns=None,
-                            include_missing_columns=True
-                        )
-                        read_options = pc.ReadOptions(use_threads=True)
-                        
-                        table = pc.read_csv(file_path, 
-                                          parse_options=parse_options,
-                                          convert_options=convert_options,
-                                          read_options=read_options)
-                        df = table.to_pandas()
-                        
-                        # 保存為 Parquet 格式以加速未來加載
-                        if self.save_preprocessed:
-                            import pyarrow.parquet as pq
-                            pq.write_table(table, parquet_path)
-                        
-                        return df, f"使用 PyArrow 加載文件 {file_idx+1}/{total_files}: {file_path}, 形狀: {df.shape}"
-                    except ImportError:
-                        # 如果沒有 PyArrow，使用 pandas 加載
-                        df = pd.read_csv(file_path, low_memory=False, dtype={
-                            'Protocol': 'category',
-                            'Destination Port': 'int32',
-                            'Flow Duration': 'float32'
-                        })
-                        return df, f"使用 pandas 加載文件 {file_idx+1}/{total_files}: {file_path}, 形狀: {df.shape}"
-                else:
-                    # 對於大文件，使用 PyArrow 直接轉換為 Parquet
-                    try:
-                        import pyarrow as pa
-                        import pyarrow.csv as pc
-                        import pyarrow.parquet as pq
-                        
-                        # 使用更高效的 CSV 解析設置
-                        parse_options = pc.ParseOptions(delimiter=',')
-                        convert_options = pc.ConvertOptions(
-                            strings_to_categorical=True,
-                            include_columns=None,
-                            include_missing_columns=True
-                        )
-                        
-                        # 使用更大的塊大小和多線程
-                        read_options = pc.ReadOptions(
-                            block_size=8 * 1024 * 1024,  # 8MB 塊大小
-                            use_threads=True
-                        )
-                        
-                        # 直接轉換 CSV 到 Parquet
-                        table = pc.read_csv(file_path, 
-                                          parse_options=parse_options,
-                                          convert_options=convert_options,
-                                          read_options=read_options)
-                        
-                        # 保存為 Parquet 格式
-                        if self.save_preprocessed:
-                            pq.write_table(table, parquet_path)
-                        
-                        # 轉換為 DataFrame
-                        df = table.to_pandas()
-                        return df, f"使用 PyArrow 直接轉換 CSV 到 Parquet: {file_path}, 形狀: {df.shape}"
-                    except (ImportError, Exception) as e:
-                        # 如果 PyArrow 方法失敗，使用 pandas 分塊加載
-                        # 計算更合理的塊大小
-                        target_chunks = 5  # 目標塊數
+                    
+                    # 使用優化設置
+                    parse_options = pc.ParseOptions(delimiter=',')
+                    convert_options = pc.ConvertOptions(
+                        strings_to_categorical=True,
+                        include_columns=None
+                    )
+                    read_options = pc.ReadOptions(
+                        block_size=16 * 1024 * 1024,  # 16MB塊大小
+                        use_threads=True
+                    )
+                    
+                    # 直接轉換並寫入Parquet
+                    table = pc.read_csv(file_path, 
+                                       parse_options=parse_options,
+                                       convert_options=convert_options,
+                                       read_options=read_options)
+                    
+                    pq.write_table(table, parquet_path, compression='snappy')
+                    return f"成功轉換: {file_path} -> {parquet_path}"
+                    
+                except ImportError:
+                    # 使用pandas轉換（較慢但兼容性更好）
+                    # 對大文件使用分塊處理
+                    file_size = os.path.getsize(file_path) / (1024 * 1024)  # MB
+                    
+                    if file_size > 1000:  # 大於1GB的文件使用分塊處理
+                        # 估計合理的分塊大小（每塊約300MB內存）
                         sample_size = 1000
                         sample_df = pd.read_csv(file_path, nrows=sample_size)
                         avg_row_size_bytes = sample_df.memory_usage(deep=True).sum() / len(sample_df)
-                        estimated_total_rows = int((file_size * 1024 * 1024) / avg_row_size_bytes)
-                        chunk_size = max(estimated_total_rows // target_chunks, 100000)
+                        rows_per_chunk = int((300 * 1024 * 1024) / avg_row_size_bytes)
                         
-                        # 分塊讀取
-                        sub_chunks = []
-                        for chunk in pd.read_csv(file_path, chunksize=chunk_size, low_memory=False):
-                            sub_chunks.append(chunk)
+                        # 分塊處理大文件
+                        writer = None
+                        for i, chunk in enumerate(pd.read_csv(file_path, chunksize=rows_per_chunk, low_memory=False)):
+                            # 優化記憶體使用
+                            chunk = optimize_dataframe_memory(chunk)
+                            
+                            if i == 0:
+                                # 第一個塊，創建Parquet文件
+                                chunk.to_parquet(parquet_path, engine='pyarrow', compression='snappy', index=False)
+                            else:
+                                # 後續塊，追加到Parquet文件
+                                chunk.to_parquet(parquet_path, engine='pyarrow', compression='snappy', 
+                                               index=False, append=True)
+                            
+                            # 釋放記憶體
+                            del chunk
+                            gc.collect()
                         
-                        # 合併所有塊
-                        df = pd.concat(sub_chunks, ignore_index=True)
-                        return df, f"使用 pandas 分塊加載文件 {file_idx+1}/{total_files}: {file_path}, 形狀: {df.shape}"
+                        return f"使用分塊處理成功轉換: {file_path} -> {parquet_path}"
+                    else:
+                        # 小文件一次性處理
+                        df = pd.read_csv(file_path, low_memory=False)
+                        df = optimize_dataframe_memory(df)
+                        df.to_parquet(parquet_path, compression='snappy', index=False)
+                        return f"成功轉換: {file_path} -> {parquet_path}"
+                
             except Exception as e:
-                return None, f"載入 {file_path} 時發生錯誤: {str(e)}"
+                return f"轉換失敗 {file_path}: {str(e)}"
         
-        # 準備文件信息
-        file_infos = [(file, i, len(file_list), file_sizes[i]) for i, file in enumerate(file_list)]
-        
-        # 使用進程池並行處理文件
-        chunks = []
+        # 並行轉換文件
         with ProcessPoolExecutor(max_workers=num_cores) as executor:
-            # 提交所有任務
-            future_to_file = {executor.submit(process_file, file_info): file_info for file_info in file_infos}
+            futures = [executor.submit(convert_to_parquet, file) for file in conversion_needed]
             
-            # 處理結果
-            for future in tqdm(as_completed(future_to_file), total=len(file_infos), desc="並行處理文件"):
-                file_info = future_to_file[future]
+            for future in tqdm(as_completed(futures), total=len(conversion_needed), desc="轉換CSV至Parquet"):
                 try:
-                    df, message = future.result()
-                    if df is not None:
-                        chunks.append(df)
-                        logger.info(message)
+                    result = future.result()
+                    logger.info(result)
                 except Exception as e:
-                    logger.error(f"處理文件 {file_info[0]} 時發生錯誤: {str(e)}")
+                    logger.error(f"轉換過程中發生錯誤: {str(e)}")
+    
+    def _process_parquet_files(self, file_list):
+        """串流處理Parquet文件而不是全部載入記憶體"""
+        # 獲取所有文件的Parquet路徑
+        parquet_files = [f.replace('.csv', '.parquet') if f.endswith('.csv') else f for f in file_list]
+        available_parquet = [f for f in parquet_files if os.path.exists(f)]
         
-        # 合併所有塊
-        if chunks:
-            logger.info(f"合併 {len(chunks)} 個資料塊")
-            self.df = pd.concat(chunks, ignore_index=True)
-            logger.info(f"合併資料集形狀: {self.df.shape}")
+        if not available_parquet:
+            raise ValueError("無法找到可用的Parquet文件")
             
-            # 釋放記憶體
-            del chunks
-            clean_memory()
+        logger.info(f"開始串流處理{len(available_parquet)}個Parquet文件")
+        
+        # 使用串流處理避免記憶體溢出
+        # 首先獲取整合後的模式和列數據類型
+        try:
+            import pyarrow.parquet as pq
+            sample_schema = pq.read_schema(available_parquet[0])
+            
+            # 獲取總行數估計
+            total_rows = 0
+            for pq_file in available_parquet:
+                metadata = pq.read_metadata(pq_file)
+                total_rows += metadata.num_rows
+                
+            logger.info(f"估計總行數: {total_rows}")
+            
+            # 初始化DataFrame
+            self.df = pd.DataFrame()
+            
+            # 優化的數據類型映射
+            dtype_mapping = {
+                'string': 'category',
+                'double': 'float32',
+                'int64': 'int32'
+            }
+            
+            # 分塊處理每個文件
+            processed_rows = 0
+            
+            for file_idx, pq_file in enumerate(available_parquet):
+                logger.info(f"處理Parquet文件 {file_idx+1}/{len(available_parquet)}: {pq_file}")
+                
+                # 檢查是否為超大文件（大於2GB）
+                file_size_mb = os.path.getsize(pq_file) / (1024 * 1024)
+                
+                if file_size_mb > 2048:  # 大於2GB的文件
+                    # 使用分批讀取避免記憶體問題
+                    parquet_file = pq.ParquetFile(pq_file)
+                    num_row_groups = parquet_file.num_row_groups
+                    
+                    logger.info(f"大型Parquet文件，分批讀取 {num_row_groups} 個行組")
+                    
+                    # 每次讀取一個行組
+                    for i in range(num_row_groups):
+                        batch_df = parquet_file.read_row_group(i).to_pandas()
+                        batch_df = optimize_dataframe_memory(batch_df)
+                        
+                        # 處理數據分析或採樣
+                        if self.use_sampling and self.df.empty:
+                            # 對於第一批數據，儲存樣本用於後續的採樣決策
+                            if i == 0:
+                                self.df = batch_df
+                            else:
+                                # 採樣策略 - 每n行取一行
+                                sample_rate = int(1.0 / self.sampling_ratio)
+                                sampled_rows = batch_df.iloc[::sample_rate]
+                                self.df = pd.concat([self.df, sampled_rows], ignore_index=True)
+                        else:
+                            # 如果不採樣或已有數據，直接連接
+                            if self.df.empty:
+                                self.df = batch_df
+                            else:
+                                self.df = pd.concat([self.df, batch_df], ignore_index=True)
+                        
+                        processed_rows += len(batch_df)
+                        logger.info(f"已處理 {processed_rows}/{total_rows} 行 ({processed_rows/total_rows:.1%})")
+                        
+                        # 定期釋放記憶體
+                        del batch_df
+                        gc.collect()
+                else:
+                    # 小於2GB的文件，一次性讀取
+                    file_df = pd.read_parquet(pq_file)
+                    file_df = optimize_dataframe_memory(file_df)
+                    
+                    if self.df.empty:
+                        self.df = file_df
+                    else:
+                        self.df = pd.concat([self.df, file_df], ignore_index=True)
+                    
+                    processed_rows += len(file_df)
+                    logger.info(f"已處理 {processed_rows}/{total_rows} 行 ({processed_rows/total_rows:.1%})")
+                    
+                    # 釋放記憶體
+                    del file_df
+                    gc.collect()
+            
+            # 對整合後的數據進行全局優化
+            self.df = optimize_dataframe_memory(self.df)
+            logger.info(f"完成數據加載: 形狀 {self.df.shape}")
+            
+        except Exception as e:
+            logger.error(f"處理Parquet文件時發生錯誤: {str(e)}")
+            # 備用方法：如果PyArrow失敗，使用pandas直接加載
+            self._fallback_load_parquet(available_parquet)
+    
+    def _fallback_load_parquet(self, parquet_files):
+        """備用加載方法，使用pandas直接加載Parquet"""
+        logger.warning("使用備用方法加載Parquet文件")
+        dfs = []
+        
+        for file_idx, pq_file in enumerate(parquet_files):
+            try:
+                logger.info(f"加載文件 {file_idx+1}/{len(parquet_files)}: {pq_file}")
+                df = pd.read_parquet(pq_file)
+                df = optimize_dataframe_memory(df)
+                dfs.append(df)
+                
+                # 定期釋放記憶體
+                if (file_idx + 1) % 3 == 0:
+                    gc.collect()
+            except Exception as e:
+                logger.error(f"加載 {pq_file} 失敗: {str(e)}")
+        
+        if dfs:
+            # 分批次合併以減少記憶體峰值
+            self.df = None
+            batch_size = 5  # 每次合併5個DataFrame
+            for i in range(0, len(dfs), batch_size):
+                batch = dfs[i:i+batch_size]
+                batch_df = pd.concat(batch, ignore_index=True)
+                
+                if self.df is None:
+                    self.df = batch_df
+                else:
+                    self.df = pd.concat([self.df, batch_df], ignore_index=True)
+                
+                # 釋放批次記憶體
+                del batch
+                del batch_df
+                gc.collect()
+            
+            logger.info(f"完成數據加載: 形狀 {self.df.shape}")
         else:
-            raise ValueError("未能成功加載任何文件")
+            raise ValueError("所有文件加載失敗")
     
     def _load_single_file_incrementally(self, file_path):
         """增量式加載單個文件 - 優化效能版本"""
