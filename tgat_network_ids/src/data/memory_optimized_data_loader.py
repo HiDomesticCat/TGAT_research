@@ -133,18 +133,31 @@ class MemoryOptimizedDataLoader:
     def _check_preprocessed_exists(self):
         """檢查預處理文件是否存在"""
         files = self._get_preprocessed_files()
-        return all(os.path.exists(f) for f in files.values())
+        # 檢查特徵文件是必要的，其他文件如果不存在可以重新生成
+        essential_files = ['features', 'target']
+        essential_exist = all(os.path.exists(files[f]) for f in essential_files)
+        all_exist = all(os.path.exists(f) for f in files.values())
+        
+        if essential_exist and not all_exist:
+            logger.warning("發現部分預處理檔案，但不完整，將嘗試重新生成缺失的檔案")
+            
+        # 如果至少存在特徵和標籤文件，認為預處理存在
+        return essential_exist
     
     @memory_usage_decorator
     def load_data(self):
         """載入資料集"""
         logger.info(f"載入資料集從: {self.data_path}")
         
-        # 檢查是否有預處理好的資料
+        # 先檢查是否有完整的預處理好的資料
         if self.save_preprocessed and self._check_preprocessed_exists():
             logger.info("發現預處理資料，直接加載")
-            self._load_preprocessed_data()
-            return self.df
+            success = self._load_preprocessed_data()
+            if success:
+                logger.info("預處理資料加載成功")
+                return self.df
+            else:
+                logger.warning("預處理資料加載失敗，將重新處理原始資料")
         
         # 檢查是csv檔案還是目錄
         if os.path.isdir(self.data_path):
@@ -766,65 +779,121 @@ class MemoryOptimizedDataLoader:
         logger.info("預處理資料保存完成")
     
     def _load_preprocessed_data(self):
-        """加載預處理後的資料"""
-        with track_memory_usage("加載預處理資料"):
-            logger.info(f"加載預處理資料從: {self.preprocessed_path}")
+        """加載預處理後的資料，並處理兼容性問題"""
+        try:
+            with track_memory_usage("加載預處理資料"):
+                logger.info(f"加載預處理資料從: {self.preprocessed_path}")
+                
+                files = self._get_preprocessed_files()
+                
+                # 先嘗試加載必要的文件
+                # 1. 加載特徵
+                if self.use_memory_mapping:
+                    # 使用記憶體映射加載
+                    try:
+                        # 使用新的加載函數
+                        self.features = load_memory_mapped_array(files['features'], mode='r')
+                    except Exception as e:
+                        logger.warning(f"使用新函數加載記憶體映射失敗: {str(e)}，嘗試舊方法")
+                        try:
+                            # 檢查是否有形狀文件
+                            shape_file = f"{files['features']}.shape.npy"
+                            if os.path.exists(shape_file):
+                                # 回退到舊方法
+                                self.features = np.memmap(
+                                    files['features'],
+                                    dtype=np.float32,
+                                    mode='r',
+                                    shape=tuple(np.load(shape_file))
+                                )
+                            else:
+                                # 無法確定形狀，直接使用numpy加載
+                                logger.warning("無法確定記憶體映射形狀，嘗試直接加載")
+                                self.features = np.load(files['features'])
+                        except Exception as e2:
+                            logger.error(f"加載特徵失敗: {str(e2)}")
+                            return False
+                else:
+                    # 直接加載 numpy 數組
+                    try:
+                        self.features = np.load(files['features'])
+                    except Exception as e:
+                        logger.error(f"加載特徵失敗: {str(e)}")
+                        return False
             
-            files = self._get_preprocessed_files()
-            
-            # 加載特徵
-            if self.use_memory_mapping:
-                # 使用記憶體映射加載
+                # 2. 加載標籤
                 try:
-                    # 使用新的加載函數
-                    self.features = load_memory_mapped_array(files['features'], mode='r')
+                    target_values = np.load(files['target'])
+                    self.target = pd.Series(target_values)
                 except Exception as e:
-                    logger.warning(f"使用新函數加載記憶體映射失敗: {str(e)}，嘗試舊方法")
-                    # 回退到舊方法
-                    self.features = np.memmap(
-                        files['features'],
-                        dtype=np.float32,
-                        mode='r',
-                        shape=tuple(np.load(f"{files['features']}.shape.npy"))
-                    )
-            else:
-                # 直接加載 numpy 數組
-                self.features = np.load(files['features'])
-        
-        # 加載標籤
-        target_values = np.load(files['target'])
-        self.target = pd.Series(target_values)
-        
-        # 加載特徵名稱
-        with open(files['feature_names'], 'rb') as f:
-            self.feature_names = pickle.load(f)
-        
-        # 加載標準化器
-        with open(files['scaler'], 'rb') as f:
-            self.scaler = pickle.load(f)
-        
-        # 加載標籤編碼器
-        with open(files['label_encoder'], 'rb') as f:
-            self.label_encoder = pickle.load(f)
-        
-        # 如果存在訓練集和測試集索引，也加載它們
-        if os.path.exists(files['train_indices']) and os.path.exists(files['test_indices']):
-            self.train_indices = np.load(files['train_indices'])
-            self.test_indices = np.load(files['test_indices'])
-            
-            # 使用索引拆分數據
-            self.X_train = self.features[self.train_indices]
-            self.X_test = self.features[self.test_indices]
-            self.y_train = self.target.iloc[self.train_indices]
-            self.y_test = self.target.iloc[self.test_indices]
-            
-            logger.info(f"已加載拆分的訓練集和測試集")
-            logger.info(f"  訓練集: X_train {self.X_train.shape}, y_train {self.y_train.shape}")
-            logger.info(f"  測試集: X_test {self.X_test.shape}, y_test {self.y_test.shape}")
-        
-        logger.info(f"預處理資料加載完成: 特徵形狀 {self.features.shape}, 標籤形狀 {self.target.shape}")
-        
-        return self.features, self.target
+                    logger.error(f"加載標籤失敗: {str(e)}")
+                    return False
+                
+                # 嘗試加載其他輔助文件，如果這些文件不存在或損壞，我們可以重新生成
+                # 3. 加載特徵名稱
+                try:
+                    if os.path.exists(files['feature_names']):
+                        with open(files['feature_names'], 'rb') as f:
+                            self.feature_names = pickle.load(f)
+                    else:
+                        # 生成默認特徵名稱
+                        logger.warning("特徵名稱文件不存在，生成默認名稱")
+                        self.feature_names = [f'feature_{i}' for i in range(self.features.shape[1])]
+                except Exception as e:
+                    logger.warning(f"加載特徵名稱失敗: {str(e)}，生成默認名稱")
+                    self.feature_names = [f'feature_{i}' for i in range(self.features.shape[1])]
+                
+                # 4. 加載標準化器
+                try:
+                    if os.path.exists(files['scaler']):
+                        with open(files['scaler'], 'rb') as f:
+                            self.scaler = pickle.load(f)
+                    else:
+                        # 創建新標準化器
+                        logger.warning("標準化器文件不存在，創建新標準化器")
+                        self.scaler = StandardScaler()
+                except Exception as e:
+                    logger.warning(f"加載標準化器失敗: {str(e)}，創建新標準化器")
+                    self.scaler = StandardScaler()
+                
+                # 5. 加載標籤編碼器
+                try:
+                    if os.path.exists(files['label_encoder']):
+                        with open(files['label_encoder'], 'rb') as f:
+                            self.label_encoder = pickle.load(f)
+                    else:
+                        # 創建新標籤編碼器
+                        logger.warning("標籤編碼器文件不存在，創建新標籤編碼器")
+                        self.label_encoder = LabelEncoder()
+                except Exception as e:
+                    logger.warning(f"加載標籤編碼器失敗: {str(e)}，創建新標籤編碼器")
+                    self.label_encoder = LabelEncoder()
+                
+                # 6. 如果存在訓練集和測試集索引，也加載它們
+                try:
+                    if os.path.exists(files['train_indices']) and os.path.exists(files['test_indices']):
+                        self.train_indices = np.load(files['train_indices'])
+                        self.test_indices = np.load(files['test_indices'])
+                        
+                        # 使用索引拆分數據
+                        self.X_train = self.features[self.train_indices]
+                        self.X_test = self.features[self.test_indices]
+                        self.y_train = self.target.iloc[self.train_indices]
+                        self.y_test = self.target.iloc[self.test_indices]
+                        
+                        logger.info(f"已加載拆分的訓練集和測試集")
+                        logger.info(f"  訓練集: X_train {self.X_train.shape}, y_train {self.y_train.shape}")
+                        logger.info(f"  測試集: X_test {self.X_test.shape}, y_test {self.y_test.shape}")
+                except Exception as e:
+                    logger.warning(f"加載訓練/測試集索引失敗: {str(e)}")
+                    # 不進行任何操作，拆分將在需要時進行
+                
+                logger.info(f"預處理資料加載完成: 特徵形狀 {self.features.shape}, 標籤形狀 {self.target.shape}")
+                
+                return True
+        except Exception as e:
+            logger.error(f"加載預處理數據時發生未預期的錯誤: {str(e)}")
+            return False
     
     def _sample_data(self):
         """
