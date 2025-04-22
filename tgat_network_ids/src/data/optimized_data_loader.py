@@ -162,6 +162,248 @@ class EnhancedMemoryOptimizedDataLoader:
 
         return self.df
 
+    def preprocess(self):
+        """預處理資料 - 對數值和分類特徵進行標準化和編碼"""
+        logger.info("開始預處理資料...")
+        
+        # 載入資料
+        if self.df is None:
+            self.load_data()
+            
+        if self.df is None or self.df.empty:
+            raise ValueError("資料載入失敗，無法進行預處理")
+            
+        # 進行特徵和目標分離
+        # 尋找常見的目標列名
+        target_columns = ['label', 'class', 'target', 'attack_type', 'is_attack']
+        target_col = None
+        
+        for col in target_columns:
+            if col in self.df.columns:
+                target_col = col
+                break
+                
+        if target_col is None:
+            # 假設最後一列是目標
+            target_col = self.df.columns[-1]
+            logger.warning(f"未找到明確的目標列，使用最後一列 '{target_col}' 作為目標")
+        
+        # 提取特徵和目標
+        self.target = self.df[target_col]
+        self.features = self.df.drop(columns=[target_col])
+        
+        # 儲存特徵名稱
+        self.feature_names = list(self.features.columns)
+        
+        # 標準化數值特徵
+        num_features = self.features.select_dtypes(include=['int', 'float'])
+        if not num_features.empty:
+            # 創建副本以避免 SettingWithCopyWarning
+            self.features = self.features.copy()
+            
+            # 標準化數值特徵
+            num_cols = num_features.columns
+            self.features[num_cols] = self.scaler.fit_transform(num_features)
+            
+        # 編碼分類目標
+        if not pd.api.types.is_numeric_dtype(self.target):
+            self.target = pd.Series(self.label_encoder.fit_transform(self.target))
+            
+        logger.info(f"預處理完成。特徵形狀: {self.features.shape}, 目標形狀: {self.target.shape}")
+        
+        # 如果啟用保存預處理資料
+        if self.save_preprocessed:
+            self._save_preprocessed_data()
+            
+        return self.features, self.target
+        
+    def split_data(self):
+        """拆分資料為訓練集和測試集"""
+        logger.info(f"拆分資料為訓練集和測試集 (測試集比例: {self.test_size})")
+        
+        # 確保特徵和目標已準備好
+        if self.features is None or self.target is None:
+            self.preprocess()
+            
+        # 使用 sklearn 進行拆分
+        X_train, X_test, y_train, y_test = train_test_split(
+            self.features, self.target,
+            test_size=self.test_size,
+            random_state=self.random_state,
+            stratify=self.target  # 分層抽樣以保持類別分佈
+        )
+        
+        # 儲存拆分結果
+        self.X_train = X_train
+        self.X_test = X_test
+        self.y_train = y_train
+        self.y_test = y_test
+        
+        logger.info(f"資料拆分完成。訓練集: {X_train.shape}, 測試集: {X_test.shape}")
+        
+        return X_train, X_test, y_train, y_test
+        
+    def get_attack_types(self):
+        """獲取攻擊類型映射"""
+        # 確保目標已編碼
+        if self.target is None:
+            self.preprocess()
+            
+        # 如果目標已經被編碼
+        if hasattr(self.label_encoder, 'classes_'):
+            attack_types = {i: name for i, name in enumerate(self.label_encoder.classes_)}
+        else:
+            # 如果目標沒有被編碼或者是數值型
+            unique_labels = sorted(self.target.unique())
+            attack_types = {label: f"Type_{label}" for label in unique_labels}
+            
+        return attack_types
+        
+    def get_sample_batch(self, batch_size=None):
+        """獲取一個批次的樣本，用於測試或即時檢測"""
+        if batch_size is None:
+            batch_size = self.batch_size
+            
+        # 確保測試集已準備好
+        if self.X_test is None or self.y_test is None:
+            self.split_data()
+            
+        # 從測試集隨機採樣
+        random_indices = np.random.choice(len(self.X_test), size=min(batch_size, len(self.X_test)), replace=False)
+        
+        batch_features = self.X_test.iloc[random_indices]
+        batch_labels = self.y_test.iloc[random_indices]
+        
+        return batch_features.values, batch_labels.values, random_indices
+        
+    def get_temporal_edges(self, max_edges=None):
+        """獲取時間性邊 - 根據連續封包之間的時間關係生成"""
+        logger.info("生成時間性邊...")
+        
+        # 確保特徵已準備好
+        if self.features is None:
+            self.preprocess()
+            
+        # 檢查是否有時間戳列
+        time_cols = [col for col in self.feature_names if 'time' in col.lower()]
+        
+        if not time_cols:
+            logger.warning("未找到時間戳列，使用隨機生成的時間性邊")
+            # 隨機生成邊
+            edges = []
+            num_nodes = len(self.features)
+            
+            # 限制最大邊數
+            if max_edges is None:
+                max_edges = min(500000, num_nodes * 10)
+                
+            # 生成隨機邊
+            for _ in range(max_edges):
+                src = np.random.randint(0, num_nodes)
+                dst = np.random.randint(0, num_nodes)
+                
+                # 避免自環
+                while dst == src:
+                    dst = np.random.randint(0, num_nodes)
+                    
+                # 生成隨機時間戳和特徵
+                timestamp = np.random.random() * 100  # 隨機時間戳
+                edge_feat = [np.random.random() for _ in range(3)]  # 隨機3維邊特徵
+                
+                edges.append((src, dst, timestamp, edge_feat))
+                
+            logger.info(f"隨機生成了 {len(edges)} 條時間性邊")
+            return edges
+            
+        # 使用時間戳生成邊
+        logger.info(f"使用時間戳列 '{time_cols[0]}' 生成時間性邊")
+        time_col = time_cols[0]
+        
+        # 排序特徵按時間戳
+        sorted_indices = np.argsort(self.features[time_col].values)
+        
+        # 生成邊 - 連接時間上相鄰的節點
+        edges = []
+        
+        for i in range(1, len(sorted_indices)):
+            src = sorted_indices[i-1]
+            dst = sorted_indices[i]
+            
+            # 獲取時間戳
+            timestamp = self.features[time_col].values[dst]
+            
+            # 生成簡單的邊特徵
+            edge_feat = [np.random.random() for _ in range(3)]
+            
+            edges.append((src, dst, timestamp, edge_feat))
+            
+            # 隨機添加額外連接以增加圖密度
+            if np.random.random() < 0.3:  # 30%機率添加額外連接
+                extra_dst = sorted_indices[max(0, i-2)]  # 連接到前面的節點
+                edges.append((src, extra_dst, timestamp, edge_feat))
+                
+            # 限制最大邊數
+            if max_edges is not None and len(edges) >= max_edges:
+                break
+                
+        logger.info(f"基於時間戳生成了 {len(edges)} 條時間性邊")
+        return edges
+        
+    def _check_preprocessed_exists(self):
+        """檢查預處理資料是否存在"""
+        feature_path = os.path.join(self.preprocessed_path, 'features.parquet')
+        target_path = os.path.join(self.preprocessed_path, 'target.parquet')
+        
+        return os.path.exists(feature_path) and os.path.exists(target_path)
+        
+    def _save_preprocessed_data(self):
+        """保存預處理後的資料"""
+        # 確保目錄存在
+        if not os.path.exists(self.preprocessed_path):
+            os.makedirs(self.preprocessed_path)
+            
+        # 保存特徵和目標
+        feature_path = os.path.join(self.preprocessed_path, 'features.parquet')
+        target_path = os.path.join(self.preprocessed_path, 'target.parquet')
+        
+        self.features.to_parquet(feature_path, index=False)
+        pd.DataFrame({'target': self.target}).to_parquet(target_path, index=False)
+        
+        # 保存編碼器和縮放器
+        with open(os.path.join(self.preprocessed_path, 'scaler.pkl'), 'wb') as f:
+            pickle.dump(self.scaler, f)
+            
+        with open(os.path.join(self.preprocessed_path, 'label_encoder.pkl'), 'wb') as f:
+            pickle.dump(self.label_encoder, f)
+            
+        logger.info(f"預處理資料已保存至: {self.preprocessed_path}")
+        
+    def _load_preprocessed_data(self):
+        """載入預處理後的資料"""
+        try:
+            feature_path = os.path.join(self.preprocessed_path, 'features.parquet')
+            target_path = os.path.join(self.preprocessed_path, 'target.parquet')
+            
+            self.features = pd.read_parquet(feature_path)
+            target_df = pd.read_parquet(target_path)
+            self.target = target_df['target']
+            
+            # 儲存特徵名稱
+            self.feature_names = list(self.features.columns)
+            
+            # 載入編碼器和縮放器
+            with open(os.path.join(self.preprocessed_path, 'scaler.pkl'), 'rb') as f:
+                self.scaler = pickle.load(f)
+                
+            with open(os.path.join(self.preprocessed_path, 'label_encoder.pkl'), 'rb') as f:
+                self.label_encoder = pickle.load(f)
+                
+            logger.info(f"預處理資料載入成功: 特徵形狀={self.features.shape}, 目標形狀={self.target.shape}")
+            return True
+        except Exception as e:
+            logger.error(f"預處理資料載入失敗: {str(e)}")
+            return False
+    
     def _enhanced_optimize_dataframe_memory(self, df):
         """增強版DataFrame記憶體優化 - 更積極的類型轉換策略"""
         start_mem = df.memory_usage(deep=True).sum() / (1024 * 1024)

@@ -798,7 +798,8 @@ def main():
         # 停止記憶體監控
         if memory_monitor:
             memory_monitor.stop()
-            memory_monitor.generate_report(f"memory_report_{get_timestamp()}")
+            # 不傳入參數，讓函數內部決定檔案名稱
+            memory_monitor.generate_report()
             logger.info("已生成記憶體使用報告")
 
         # 確保釋放所有資源
