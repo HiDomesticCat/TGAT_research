@@ -478,6 +478,103 @@ class EnhancedMemoryOptimizedDataLoader:
         
         return df_optimized
 
+    def _process_parquet_with_polars(self, parquet_files):
+        """使用Polars高效處理Parquet文件"""
+        logger.info(f"使用Polars處理 {len(parquet_files)} 個Parquet文件")
+        
+        if not POLARS_AVAILABLE:
+            logger.warning("Polars不可用，回退到PyArrow處理")
+            return False
+            
+        try:
+            # 使用Polars的LazyFrame高效讀取Parquet
+            dfs = []
+            
+            for i, parquet_file in enumerate(tqdm(parquet_files, desc="Polars讀取Parquet")):
+                try:
+                    # 使用scan_parquet比直接read_parquet更節省記憶體
+                    lf = pl.scan_parquet(parquet_file)
+                    
+                    # 應用採樣（如果需要）
+                    if self.use_sampling and self.sampling_strategy == 'random':
+                        lf = lf.sample(fraction=self.sampling_ratio)
+                        
+                    # 收集DataFrame - 使用批次以節省記憶體
+                    df = lf.collect()
+                    dfs.append(df)
+                    
+                    logger.info(f"Polars成功讀取Parquet: {parquet_file}, 形狀: {df.shape}")
+                    
+                    # 定期釋放記憶體
+                    if (i + 1) % 3 == 0:
+                        # 合併已處理的DataFrame
+                        if len(dfs) > 1:
+                            combined = pl.concat(dfs)
+                            dfs = [combined]
+                            
+                        # 強制垃圾回收
+                        gc.collect()
+                except Exception as e:
+                    logger.error(f"Polars讀取Parquet失敗 {parquet_file}: {str(e)}")
+                    
+            # 合併所有DataFrame
+            if dfs:
+                logger.info(f"合併 {len(dfs)} 個Polars DataFrame")
+                
+                # 使用concat而非較慢的vstack
+                if len(dfs) > 1:
+                    combined_df = pl.concat(dfs)
+                else:
+                    combined_df = dfs[0]
+                
+                # 對於分層採樣，在這裡處理
+                if self.use_sampling and self.sampling_strategy == 'stratified' and 'label' in combined_df.columns:
+                    # 對每個類別單獨採樣
+                    sampled_dfs = []
+                    
+                    # 獲取唯一標籤
+                    labels = combined_df.select('label').unique().to_series()
+                    
+                    for lbl in labels:
+                        # 過濾單一類別的資料
+                        class_df = combined_df.filter(pl.col('label') == lbl)
+                        class_size = class_df.shape[0]
+                        
+                        # 計算採樣數量
+                        sample_size = max(
+                            int(class_size * self.sampling_ratio),
+                            min(self.min_samples_per_class, class_size)
+                        )
+                        
+                        # 採樣並添加到結果中
+                        if sample_size < class_size:
+                            sampled_class = class_df.sample(n=sample_size)
+                            sampled_dfs.append(sampled_class)
+                        else:
+                            sampled_dfs.append(class_df)
+                            
+                    # 合併所有採樣後的類別
+                    if sampled_dfs:
+                        combined_df = pl.concat(sampled_dfs)
+                        logger.info(f"分層採樣後大小: {combined_df.shape[0]}")
+                
+                # 轉換為Pandas DataFrame以便與其他代碼兼容
+                self.df = combined_df.to_pandas()
+                logger.info(f"Polars處理完成，DataFrame形狀: {self.df.shape}")
+                
+                # 釋放記憶體
+                del dfs, combined_df
+                gc.collect()
+                
+                return True
+            else:
+                logger.warning("Polars處理未產生任何有效資料")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Polars處理Parquet文件過程中發生錯誤: {str(e)}")
+            return False
+        
     def _load_with_polars(self, file_list):
         """使用Polars高效載入多個文件"""
         logger.info(f"使用Polars載入 {len(file_list)} 個文件")
@@ -533,6 +630,83 @@ class EnhancedMemoryOptimizedDataLoader:
             else:
                 self._load_data_at_once(file_list)
 
+    def _load_single_file_incrementally(self, file_path):
+        """增量式加載單個CSV文件 - 使用分塊處理"""
+        logger.info(f"增量式加載單個文件: {file_path}")
+        
+        # 檢查文件大小
+        file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
+        logger.info(f"文件大小: {file_size_mb:.2f} MB")
+        
+        # 對於大文件使用分塊處理
+        if file_size_mb > 500:  # 大於500MB
+            # 估計合理的分塊大小
+            sample_size = 1000
+            sample_df = pd.read_csv(file_path, nrows=sample_size)
+            avg_row_size_bytes = sample_df.memory_usage(deep=True).sum() / len(sample_df)
+            
+            # 算出每個批次的行數 (目標每批次100MB)
+            rows_per_chunk = int((100 * 1024 * 1024) / avg_row_size_bytes)
+            logger.info(f"大文件分塊處理，每批次約 {rows_per_chunk} 行")
+            
+            # 分塊讀取
+            dfs = []
+            for i, chunk in enumerate(tqdm(pd.read_csv(file_path, chunksize=rows_per_chunk, low_memory=False), desc="分塊處理")):
+                # 優化記憶體使用
+                chunk = self._enhanced_optimize_dataframe_memory(chunk)
+                dfs.append(chunk)
+                
+                # 定期合併以釋放記憶體
+                if len(dfs) >= 5 or (i + 1) * rows_per_chunk >= file_size_mb * 1000000 / avg_row_size_bytes:
+                    df_merged = pd.concat(dfs, ignore_index=True)
+                    if not hasattr(self, 'df') or self.df is None:
+                        self.df = df_merged
+                    else:
+                        self.df = pd.concat([self.df, df_merged], ignore_index=True)
+                    
+                    # 清理中間df
+                    dfs = []
+                    gc.collect()
+            
+            # 處理剩餘的塊
+            if dfs:
+                df_merged = pd.concat(dfs, ignore_index=True)
+                if not hasattr(self, 'df') or self.df is None:
+                    self.df = df_merged
+                else:
+                    self.df = pd.concat([self.df, df_merged], ignore_index=True)
+        else:
+            # 小文件直接讀取
+            self.df = pd.read_csv(file_path, low_memory=False)
+            self.df = self._enhanced_optimize_dataframe_memory(self.df)
+            
+        logger.info(f"載入完成，DataFrame形狀: {self.df.shape}")
+        
+    def _load_data_at_once(self, file_list):
+        """一次性加載所有CSV文件"""
+        logger.info(f"一次性加載 {len(file_list)} 個文件")
+        
+        # 讀取所有文件並合併
+        dfs = []
+        for file_path in tqdm(file_list, desc="載入文件"):
+            try:
+                df = pd.read_csv(file_path, low_memory=False)
+                df = optimize_dataframe_memory(df)  # 使用全局函數避免self引用
+                dfs.append(df)
+            except Exception as e:
+                logger.error(f"讀取文件失敗 {file_path}: {str(e)}")
+                
+        # 合併所有DataFrame
+        if dfs:
+            self.df = pd.concat(dfs, ignore_index=True)
+            logger.info(f"合併完成，DataFrame形狀: {self.df.shape}")
+            
+            # 釋放記憶體
+            del dfs
+            gc.collect()
+        else:
+            raise ValueError("所有文件均載入失敗")
+    
     def _load_single_file_with_polars(self, file_path):
         """使用Polars高效載入單個文件"""
         logger.info(f"使用Polars載入單個文件: {file_path}")
@@ -619,11 +793,102 @@ class EnhancedMemoryOptimizedDataLoader:
         # 使用Parquet格式直接載入和處理資料
         self._process_parquet_files(file_list)
 
-    def _ensure_parquet_files(self, file_list):
-        """增強版確保CSV文件轉換為Parquet格式 - 使用並行處理和PyArrow優化"""
-        import multiprocessing as mp
-        from concurrent.futures import ProcessPoolExecutor, as_completed
+    def _convert_to_parquet(self, file_path):
+        """將CSV文件轉換為Parquet格式 - 分離為獨立函數以支持多進程"""
+        parquet_path = file_path.replace('.csv', '.parquet')
+        try:
+            # 優先使用PyArrow直接轉換（更快且記憶體效率更高）
+            if self.use_pyarrow:
+                try:
+                    import pyarrow as pa
+                    import pyarrow.csv as pc
+                    import pyarrow.parquet as pq
 
+                    # 使用進階優化設置
+                    parse_options = pc.ParseOptions(delimiter=',')
+                    convert_options = pc.ConvertOptions(
+                        strings_to_categorical=True,
+                        include_columns=None,
+                    )
+                    read_options = pc.ReadOptions(
+                        block_size=32 * 1024 * 1024,  # 增加到32MB塊大小提高效率
+                        use_threads=True
+                    )
+
+                    # 直接轉換並寫入Parquet
+                    table = pc.read_csv(
+                        file_path,
+                        parse_options=parse_options,
+                        convert_options=convert_options,
+                        read_options=read_options
+                    )
+
+                    # 使用更佳的壓縮選項
+                    pq.write_table(
+                        table, 
+                        parquet_path, 
+                        compression='snappy',
+                        use_dictionary=True,
+                        write_statistics=True
+                    )
+                    return f"成功轉換: {file_path} -> {parquet_path}"
+
+                except ImportError:
+                    logger.warning("PyArrow不可用，使用pandas備用方法")
+
+            # 使用pandas轉換（較慢但兼容性更好）
+            # 對大文件使用分塊處理
+            file_size = os.path.getsize(file_path) / (1024 * 1024)  # MB
+
+            if file_size > 1000:  # 大於1GB的文件使用分塊處理
+                # 估計合理的分塊大小
+                sample_size = 1000
+                sample_df = pd.read_csv(file_path, nrows=sample_size)
+                avg_row_size_bytes = sample_df.memory_usage(deep=True).sum() / len(sample_df)
+                rows_per_chunk = int((300 * 1024 * 1024) / avg_row_size_bytes)
+
+                # 分塊處理大文件
+                for i, chunk in enumerate(pd.read_csv(file_path, chunksize=rows_per_chunk, low_memory=False)):
+                    # 優化記憶體使用
+                    chunk = optimize_dataframe_memory(chunk)  # 使用全局函數，避免self引用
+
+                    if i == 0:
+                        # 第一個塊，創建Parquet文件
+                        chunk.to_parquet(parquet_path, engine='pyarrow', compression='snappy', index=False)
+                    else:
+                        # 後續塊，追加到Parquet文件
+                        chunk.to_parquet(parquet_path, engine='pyarrow', compression='snappy',
+                                       index=False, append=True)
+
+                    # 釋放記憶體
+                    del chunk
+                    gc.collect()
+
+                return f"使用分塊處理成功轉換: {file_path} -> {parquet_path}"
+            else:
+                # 小文件一次性處理
+                try:
+                    # 嘗試使用Polars (如果可用)
+                    if 'pl' in globals() and self.use_polars:
+                        df = pl.read_csv(file_path).collect()
+                        df.write_parquet(parquet_path, compression="snappy")
+                    else:
+                        # 使用pandas
+                        df = pd.read_csv(file_path, low_memory=False)
+                        df = optimize_dataframe_memory(df)  # 使用全局函數，避免self引用
+                        df.to_parquet(parquet_path, compression='snappy', index=False)
+                except Exception as e:
+                    logger.error(f"轉換時出錯: {str(e)}, 嘗試備用方法")
+                    df = pd.read_csv(file_path, low_memory=False)
+                    df.to_parquet(parquet_path, compression='snappy', index=False)
+                    
+                return f"成功轉換: {file_path} -> {parquet_path}"
+
+        except Exception as e:
+            return f"轉換失敗 {file_path}: {str(e)}"
+
+    def _ensure_parquet_files(self, file_list):
+        """增強版確保CSV文件轉換為Parquet格式 - 使用順序處理避免多進程問題"""
         # 獲取需要轉換的文件列表
         conversion_needed = []
         for csv_file in file_list:
@@ -635,115 +900,15 @@ class EnhancedMemoryOptimizedDataLoader:
             logger.info("所有文件已有Parquet格式，無需轉換")
             return
 
-        # 獲取可用的CPU核心數，保留2核心給系統
-        num_cores = max(1, mp.cpu_count() - 2)
-        logger.info(f"使用{num_cores}個核心轉換{len(conversion_needed)}個文件為Parquet格式")
-
-        # 轉換函數：將CSV轉為Parquet - 使用PyArrow優化
-        def convert_to_parquet(file_path):
-            parquet_path = file_path.replace('.csv', '.parquet')
+        # 降級到順序處理以避免多進程問題
+        logger.info(f"順序轉換 {len(conversion_needed)} 個文件為Parquet格式")
+        
+        for i, file_path in enumerate(tqdm(conversion_needed, desc="轉換CSV至Parquet")):
             try:
-                # 優先使用PyArrow直接轉換（更快且記憶體效率更高）
-                if self.use_pyarrow:
-                    try:
-                        import pyarrow as pa
-                        import pyarrow.csv as pc
-                        import pyarrow.parquet as pq
-
-                        # 使用進階優化設置
-                        parse_options = pc.ParseOptions(delimiter=',')
-                        convert_options = pc.ConvertOptions(
-                            strings_to_categorical=True,
-                            include_columns=None,
-                        )
-                        read_options = pc.ReadOptions(
-                            block_size=32 * 1024 * 1024,  # 增加到32MB塊大小提高效率
-                            use_threads=True
-                        )
-
-                        # 直接轉換並寫入Parquet
-                        table = pc.read_csv(
-                            file_path,
-                            parse_options=parse_options,
-                            convert_options=convert_options,
-                            read_options=read_options
-                        )
-
-                        # 使用更佳的壓縮選項
-                        pq.write_table(
-                            table, 
-                            parquet_path, 
-                            compression='snappy',
-                            use_dictionary=True,
-                            write_statistics=True
-                        )
-                        return f"成功轉換: {file_path} -> {parquet_path}"
-
-                    except ImportError:
-                        logger.warning("PyArrow不可用，使用pandas備用方法")
-
-                # 使用pandas轉換（較慢但兼容性更好）
-                # 對大文件使用分塊處理
-                file_size = os.path.getsize(file_path) / (1024 * 1024)  # MB
-
-                if file_size > 1000:  # 大於1GB的文件使用分塊處理
-                    # 估計合理的分塊大小
-                    sample_size = 1000
-                    sample_df = pd.read_csv(file_path, nrows=sample_size)
-                    avg_row_size_bytes = sample_df.memory_usage(deep=True).sum() / len(sample_df)
-                    rows_per_chunk = int((300 * 1024 * 1024) / avg_row_size_bytes)
-
-                    # 分塊處理大文件
-                    for i, chunk in enumerate(pd.read_csv(file_path, chunksize=rows_per_chunk, low_memory=False)):
-                        # 優化記憶體使用
-                        chunk = self._enhanced_optimize_dataframe_memory(chunk)
-
-                        if i == 0:
-                            # 第一個塊，創建Parquet文件
-                            chunk.to_parquet(parquet_path, engine='pyarrow', compression='snappy', index=False)
-                        else:
-                            # 後續塊，追加到Parquet文件
-                            chunk.to_parquet(parquet_path, engine='pyarrow', compression='snappy',
-                                           index=False, append=True)
-
-                        # 釋放記憶體
-                        del chunk
-                        gc.collect()
-
-                    return f"使用分塊處理成功轉換: {file_path} -> {parquet_path}"
-                else:
-                    # 小文件一次性處理
-                    try:
-                        # 嘗試使用Polars (如果可用)
-                        if POLARS_AVAILABLE and self.use_polars:
-                            df = pl.read_csv(file_path).collect()
-                            df.write_parquet(parquet_path, compression="snappy")
-                        else:
-                            # 使用pandas
-                            df = pd.read_csv(file_path, low_memory=False)
-                            df = self._enhanced_optimize_dataframe_memory(df)
-                            df.to_parquet(parquet_path, compression='snappy', index=False)
-                    except Exception as e:
-                        logger.error(f"轉換時出錯: {str(e)}, 嘗試備用方法")
-                        df = pd.read_csv(file_path, low_memory=False)
-                        df = optimize_dataframe_memory(df)
-                        df.to_parquet(parquet_path, compression='snappy', index=False)
-                        
-                    return f"成功轉換: {file_path} -> {parquet_path}"
-
+                result = self._convert_to_parquet(file_path)
+                logger.info(f"[{i+1}/{len(conversion_needed)}] {result}")
             except Exception as e:
-                return f"轉換失敗 {file_path}: {str(e)}"
-
-        # 並行轉換文件
-        with ProcessPoolExecutor(max_workers=num_cores) as executor:
-            futures = [executor.submit(convert_to_parquet, file) for file in conversion_needed]
-
-            for future in tqdm(as_completed(futures), total=len(conversion_needed), desc="轉換CSV至Parquet"):
-                try:
-                    result = future.result()
-                    logger.info(result)
-                except Exception as e:
-                    logger.error(f"轉換過程中發生錯誤: {str(e)}")
+                logger.error(f"轉換過程中發生錯誤: {str(e)}")
 
     def _process_parquet_files(self, file_list):
         """增強版串流處理Parquet文件 - 使用更佳的批次處理和記憶體管理"""
