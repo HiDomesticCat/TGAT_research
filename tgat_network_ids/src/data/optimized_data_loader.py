@@ -522,65 +522,149 @@ class EnhancedMemoryOptimizedDataLoader:
                 return
                 
             # 備用：使用PyArrow直接讀取
-            import pyarrow.parquet as pq
-            
-            # 估計總行數
-            total_rows = 0
-            for pq_file in available_parquet:
-                metadata = pq.read_metadata(pq_file)
-                total_rows += metadata.num_rows
+            try:
+                import pyarrow.parquet as pq
+                
+                # 估計總行數
+                total_rows = 0
+                for pq_file in available_parquet:
+                    metadata = pq.read_metadata(pq_file)
+                    total_rows += metadata.num_rows
 
-            logger.info(f"估計總行數: {total_rows}")
+                logger.info(f"估計總行數: {total_rows}")
 
-            # 初始化DataFrame
-            self.df = pd.DataFrame()
+                # 初始化DataFrame
+                self.df = pd.DataFrame()
 
-            # 優化的數據類型映射
-            dtype_mapping = {
-                'string': 'category',
-                'double': 'float32',
-                'int64': 'int32'
-            }
+                # 優化的數據類型映射
+                dtype_mapping = {
+                    'string': 'category',
+                    'double': 'float32',
+                    'int64': 'int32'
+                }
 
-            # 分塊處理每個文件
-            processed_rows = 0
+                # 分塊處理每個文件
+                processed_rows = 0
 
-            for file_idx, pq_file in enumerate(available_parquet):
-                logger.info(f"處理Parquet文件 {file_idx+1}/{len(available_parquet)}: {pq_file}")
+                for file_idx, pq_file in enumerate(available_parquet):
+                    logger.info(f"處理Parquet文件 {file_idx+1}/{len(available_parquet)}: {pq_file}")
 
-                # 檢查是否為超大文件（大於2GB）
-                file_size_mb = os.path.getsize(pq_file) / (1024 * 1024)
+                    # 檢查是否為超大文件（大於2GB）
+                    file_size_mb = os.path.getsize(pq_file) / (1024 * 1024)
 
-                if file_size_mb > 2048:  # 大於2GB的文件
-                    # 使用分批讀取避免記憶體問題
-                    parquet_file = pq.ParquetFile(pq_file)
-                    num_row_groups = parquet_file.num_row_groups
+                    if file_size_mb > 2048:  # 大於2GB的文件
+                        # 使用分批讀取避免記憶體問題
+                        parquet_file = pq.ParquetFile(pq_file)
+                        num_row_groups = parquet_file.num_row_groups
 
-                    logger.info(f"大型Parquet文件，分批讀取 {num_row_groups} 個行組")
+                        logger.info(f"大型Parquet文件，分批讀取 {num_row_groups} 個行組")
 
-                    # 收集所有批次的DataFrames，然後一次性合併
-                    batch_dfs = []
-                    
-                    # 每次讀取一個行組
-                    for i in range(num_row_groups):
-                        # 讀取一個行組並轉換為pandas DataFrame
-                        batch_df = parquet_file.read_row_group(i).to_pandas()
-                        batch_df = self._enhanced_optimize_dataframe_memory(batch_df)
-
-                        # 收集批次DataFrame
-                        batch_dfs.append(batch_df)
+                        # 收集所有批次的DataFrames，然後一次性合併
+                        batch_dfs = []
                         
-                        # 定期合併並釋放記憶體
-                        if len(batch_dfs) >= 5 or i == num_row_groups - 1:
-                            combined_batch = pd.concat(batch_dfs, ignore_index=True)
+                        # 每次讀取一個行組
+                        for i in range(num_row_groups):
+                            # 讀取一個行組並轉換為pandas DataFrame
+                            batch_df = parquet_file.read_row_group(i).to_pandas()
+                            batch_df = self._enhanced_optimize_dataframe_memory(batch_df)
+
+                            # 收集批次DataFrame
+                            batch_dfs.append(batch_df)
+                            
+                            # 定期合併並釋放記憶體
+                            if len(batch_dfs) >= 5 or i == num_row_groups - 1:
+                                combined_batch = pd.concat(batch_dfs, ignore_index=True)
+                                
+                                if self.df.empty:
+                                    self.df = combined_batch
+                                else:
+                                    self.df = pd.concat([self.df, combined_batch], ignore_index=True)
+                                    
+                                # 清理批次
+                                batch_dfs = []
+                                gc.collect()
+
+                            processed_rows += len(batch_df)
+                    else:
+                        # 較小文件一次性讀取
+                        try:
+                            batch_df = pd.read_parquet(pq_file)
+                            batch_df = self._enhanced_optimize_dataframe_memory(batch_df)
                             
                             if self.df.empty:
-                                self.df = combined_batch
+                                self.df = batch_df
                             else:
-                                self.df = pd.concat([self.df, combined_batch], ignore_index=True)
+                                self.df = pd.concat([self.df, batch_df], ignore_index=True)
                                 
-                            # 清理批次
-                            batch_dfs = []
+                            processed_rows += len(batch_df)
+                            
+                            # 定期進行垃圾收集
+                            if self.aggressive_gc or file_idx % 3 == 0:
+                                gc.collect()
+                                
+                        except Exception as e:
+                            logger.error(f"讀取Parquet文件失敗 {pq_file}: {str(e)}")
+                            
+                logger.info(f"完成Parquet文件處理: 總計 {processed_rows} 行")
+                
+                # 如果啟用採樣但未在Polars層面實現，在這裡進行採樣
+                if self.use_sampling and self.df is not None and not self.df.empty:
+                    if self.sampling_strategy == 'random':
+                        # 隨機採樣
+                        sample_size = max(int(len(self.df) * self.sampling_ratio), 1000)
+                        self.df = self.df.sample(n=sample_size, random_state=self.random_state)
+                        logger.info(f"隨機採樣後大小: {len(self.df)}")
+                    elif self.sampling_strategy == 'stratified':
+                        # 分層採樣 (如果有標籤列)
+                        if 'label' in self.df.columns:
+                            from sklearn.model_selection import train_test_split
+                            
+                            # 獲取每個類別的最小樣本數
+                            classes = self.df['label'].unique()
+                            sampled_indices = []
+                            
+                            for cls in classes:
+                                cls_indices = self.df[self.df['label'] == cls].index
+                                cls_sample_size = max(
+                                    int(len(cls_indices) * self.sampling_ratio),
+                                    min(self.min_samples_per_class, len(cls_indices))
+                                )
+                                sampled_cls_indices = np.random.choice(
+                                    cls_indices, size=cls_sample_size, replace=False
+                                )
+                                sampled_indices.extend(sampled_cls_indices)
+                                
+                            self.df = self.df.loc[sampled_indices]
+                            logger.info(f"分層採樣後大小: {len(self.df)}")
+                        else:
+                            logger.warning("無法進行分層採樣: 未找到'label'列")
+            except ImportError as e:
+                logger.error(f"PyArrow導入失敗: {str(e)}")
+                logger.info("使用pandas備用方法讀取Parquet")
+                
+                # 備用：使用pandas直接讀取
+                self.df = pd.DataFrame()
+                for file_idx, pq_file in enumerate(tqdm(available_parquet, desc="讀取Parquet文件")):
+                    try:
+                        batch_df = pd.read_parquet(pq_file)
+                        
+                        if self.df.empty:
+                            self.df = batch_df
+                        else:
+                            self.df = pd.concat([self.df, batch_df], ignore_index=True)
+                            
+                        # 定期進行垃圾收集
+                        if (file_idx + 1) % 3 == 0:
                             gc.collect()
-
-                        processed_rows += len(batch_df)
+                            
+                    except Exception as e:
+                        logger.error(f"讀取Parquet文件失敗 {pq_file}: {str(e)}")
+                        
+                # 如果啟用採樣，在最終數據上執行
+                if self.use_sampling and self.df is not None and not self.df.empty:
+                    sample_size = max(int(len(self.df) * self.sampling_ratio), 1000)
+                    self.df = self.df.sample(n=sample_size, random_state=self.random_state)
+                    logger.info(f"採樣後大小: {len(self.df)}")
+            except Exception as e:
+                logger.error(f"處理Parquet文件時發生錯誤: {str(e)}")
+                raise
