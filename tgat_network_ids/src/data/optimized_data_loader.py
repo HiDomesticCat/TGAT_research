@@ -667,4 +667,59 @@ class EnhancedMemoryOptimizedDataLoader:
                     logger.info(f"採樣後大小: {len(self.df)}")
             except Exception as e:
                 logger.error(f"處理Parquet文件時發生錯誤: {str(e)}")
-                raise
+                # 重新引發異常但提供更明確的訊息
+                raise ValueError(f"Parquet處理失敗: {str(e)}") from e
+        except Exception as e:
+            logger.error(f"Parquet文件處理失敗: {str(e)}")
+            logger.info("使用pandas備用方法")
+            
+            # 備用：使用pandas直接加載CSV
+            self.df = pd.DataFrame()
+            csv_files = [f for f in file_list if f.endswith('.csv')]
+            
+            if not csv_files:
+                raise ValueError("找不到可用的CSV文件，且Parquet處理失敗")
+                
+            for file_idx, csv_file in enumerate(tqdm(csv_files, desc="備用CSV載入")):
+                try:
+                    # 分塊加載大文件
+                    file_size = os.path.getsize(csv_file) / (1024 * 1024)  # MB
+                    
+                    if file_size > 1000:  # 大於1GB
+                        chunk_dfs = []
+                        for chunk in pd.read_csv(csv_file, chunksize=100000, low_memory=False):
+                            chunk = self._enhanced_optimize_dataframe_memory(chunk)
+                            chunk_dfs.append(chunk)
+                            
+                            if len(chunk_dfs) >= 5:
+                                merged = pd.concat(chunk_dfs, ignore_index=True)
+                                if self.df.empty:
+                                    self.df = merged
+                                else:
+                                    self.df = pd.concat([self.df, merged], ignore_index=True)
+                                chunk_dfs = []
+                                gc.collect()
+                                
+                        # 處理剩餘的塊
+                        if chunk_dfs:
+                            merged = pd.concat(chunk_dfs, ignore_index=True)
+                            if self.df.empty:
+                                self.df = merged
+                            else:
+                                self.df = pd.concat([self.df, merged], ignore_index=True)
+                    else:
+                        # 小文件一次加載
+                        chunk = pd.read_csv(csv_file, low_memory=False)
+                        chunk = self._enhanced_optimize_dataframe_memory(chunk)
+                        
+                        if self.df.empty:
+                            self.df = chunk
+                        else:
+                            self.df = pd.concat([self.df, chunk], ignore_index=True)
+                            
+                    # 定期清理記憶體
+                    if (file_idx + 1) % 3 == 0:
+                        gc.collect()
+                        
+                except Exception as e:
+                    logger.error(f"備用CSV加載失敗 {csv_file}: {str(e)}")
