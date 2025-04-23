@@ -142,7 +142,7 @@ class EnhancedMemoryOptimizedDataLoader:
                 self._load_with_polars(all_files)
             elif self.incremental_loading:
                 # 增量式加載
-                self._load_data_incrementally(all_files)
+                self._load_with_incremental_processing(all_files)
             else:
                 # 一次性加載所有文件
                 self._load_data_at_once(all_files)
@@ -626,6 +626,191 @@ class EnhancedMemoryOptimizedDataLoader:
             logger.info("回退到標準載入方法")
             
             if self.incremental_loading:
-                self._load_data_incrementally(file_list)
+                self._load_with_incremental_processing(file_list)
             else:
                 self._load_data_at_once(file_list)
+                
+    def _load_with_incremental_processing(self, file_list):
+        """增強版增量式加載多個文件 - 使用更高效的串流處理"""
+        logger.info(f"增量式加載 {len(file_list)} 個文件 (增強串流處理)")
+
+        # 初始化 DataFrame
+        self.df = pd.DataFrame()
+        
+        # 逐個文件處理
+        for file_idx, file_path in enumerate(tqdm(file_list, desc="增量式加載CSV")):
+            try:
+                # 對於大文件使用分塊處理
+                file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
+                
+                if file_size_mb > 500:  # 大於500MB的文件
+                    # 估計合理的分塊大小
+                    sample_size = 1000
+                    sample_df = pd.read_csv(file_path, nrows=sample_size)
+                    avg_row_size_bytes = sample_df.memory_usage(deep=True).sum() / len(sample_df)
+                    
+                    # 算出每個批次的行數 (目標每批次100MB)
+                    rows_per_chunk = int((100 * 1024 * 1024) / avg_row_size_bytes)
+                    logger.info(f"大文件分塊處理，每批次約 {rows_per_chunk} 行")
+                    
+                    # 分塊讀取
+                    dfs = []
+                    for chunk in pd.read_csv(file_path, chunksize=rows_per_chunk, low_memory=False):
+                        # 優化記憶體使用
+                        chunk = self._enhanced_optimize_dataframe_memory(chunk)
+                        dfs.append(chunk)
+                        
+                        # 定期合併以釋放記憶體
+                        if len(dfs) >= 5:
+                            df_merged = pd.concat(dfs, ignore_index=True)
+                            if self.df.empty:
+                                self.df = df_merged
+                            else:
+                                self.df = pd.concat([self.df, df_merged], ignore_index=True)
+                            
+                            # 清理中間df
+                            dfs = []
+                            gc.collect()
+                    
+                    # 處理剩餘的塊
+                    if dfs:
+                        df_merged = pd.concat(dfs, ignore_index=True)
+                        if self.df.empty:
+                            self.df = df_merged
+                        else:
+                            self.df = pd.concat([self.df, df_merged], ignore_index=True)
+                else:
+                    # 小文件直接讀取
+                    df = pd.read_csv(file_path, low_memory=False)
+                    df = self._enhanced_optimize_dataframe_memory(df)
+                    
+                    if self.df.empty:
+                        self.df = df
+                    else:
+                        self.df = pd.concat([self.df, df], ignore_index=True)
+                
+                logger.info(f"已處理文件 {file_idx+1}/{len(file_list)}: {file_path}")
+                
+                # 定期垃圾回收
+                if (file_idx + 1) % 3 == 0:
+                    gc.collect()
+                    
+            except Exception as e:
+                logger.error(f"處理文件失敗 {file_path}: {str(e)}")
+        
+        if self.df.empty:
+            raise ValueError("所有文件均處理失敗")
+            
+        logger.info(f"增量式加載完成，DataFrame形狀: {self.df.shape}")
+    
+    def _load_single_file_incrementally(self, file_path):
+        """增量式加載單個CSV文件 - 使用分塊處理"""
+        logger.info(f"增量式加載單個文件: {file_path}")
+        
+        # 檢查文件大小
+        file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
+        logger.info(f"文件大小: {file_size_mb:.2f} MB")
+        
+        # 對於大文件使用分塊處理
+        if file_size_mb > 300:  # 大於300MB
+            # 估計合理的分塊大小
+            sample_size = 1000
+            sample_df = pd.read_csv(file_path, nrows=sample_size)
+            avg_row_size_bytes = sample_df.memory_usage(deep=True).sum() / len(sample_df)
+            
+            # 算出每個批次的行數 (目標每批次100MB)
+            rows_per_chunk = int((100 * 1024 * 1024) / avg_row_size_bytes)
+            logger.info(f"大文件分塊處理，每批次約 {rows_per_chunk} 行")
+            
+            # 分塊讀取
+            dfs = []
+            for i, chunk in enumerate(tqdm(pd.read_csv(file_path, chunksize=rows_per_chunk, low_memory=False), desc="分塊處理")):
+                # 優化記憶體使用
+                chunk = self._enhanced_optimize_dataframe_memory(chunk)
+                dfs.append(chunk)
+                
+                # 定期合併以釋放記憶體
+                if len(dfs) >= 5:
+                    self.df = pd.concat(dfs, ignore_index=True)
+                    
+                    # 清理中間df
+                    dfs = []
+                    gc.collect()
+            
+            # 處理剩餘的塊
+            if dfs:
+                if self.df is None:
+                    self.df = pd.concat(dfs, ignore_index=True)
+                else:
+                    self.df = pd.concat([self.df] + dfs, ignore_index=True)
+        else:
+            # 小文件直接讀取
+            self.df = pd.read_csv(file_path, low_memory=False)
+            self.df = self._enhanced_optimize_dataframe_memory(self.df)
+            
+        logger.info(f"載入完成，DataFrame形狀: {self.df.shape}")
+    
+    def _load_data_at_once(self, file_list):
+        """一次性加載所有CSV文件"""
+        logger.info(f"一次性加載 {len(file_list)} 個文件")
+        
+        # 讀取所有文件並合併
+        dfs = []
+        for file_path in tqdm(file_list, desc="載入文件"):
+            try:
+                df = pd.read_csv(file_path, low_memory=False)
+                df = optimize_dataframe_memory(df)  # 使用全局函數避免self引用
+                dfs.append(df)
+                
+                # 檢查是否有記憶體壓力
+                if get_memory_usage()['percent'] > 80:
+                    logger.warning("記憶體使用率過高，將提前合併並清理")
+                    temp_df = pd.concat(dfs, ignore_index=True)
+                    dfs = [temp_df]
+                    gc.collect()
+                    
+            except Exception as e:
+                logger.error(f"讀取文件失敗 {file_path}: {str(e)}")
+                
+        # 合併所有DataFrame
+        if dfs:
+            self.df = pd.concat(dfs, ignore_index=True)
+            logger.info(f"合併完成，DataFrame形狀: {self.df.shape}")
+            
+            # 釋放記憶體
+            del dfs
+            gc.collect()
+        else:
+            raise ValueError("所有文件均載入失敗")
+    
+    def _load_single_file_with_polars(self, file_path):
+        """使用Polars高效載入單個文件"""
+        logger.info(f"使用Polars載入單個文件: {file_path}")
+        
+        if not POLARS_AVAILABLE:
+            logger.warning("Polars不可用，回退到標準載入方法")
+            self._load_single_file_incrementally(file_path)
+            return
+            
+        try:
+            # 使用LazyFrame高效載入
+            lf = pl.scan_csv(file_path)
+            
+            # 應用採樣(如果需要)
+            if self.use_sampling and self.sampling_strategy == 'random':
+                lf = lf.sample(fraction=self.sampling_ratio)
+                
+            # 收集DataFrame
+            pf = lf.collect()
+            logger.info(f"Polars成功載入，形狀: {pf.shape}")
+            
+            # 轉換為Pandas DataFrame
+            self.df = pf.to_pandas()
+            
+            # 釋放記憶體
+            del pf
+            gc.collect()
+        except Exception as e:
+            logger.error(f"Polars載入失敗: {str(e)}")
+            logger.info("回退到標準載入方法")
+            self._load_single_file_incrementally(file_path)
