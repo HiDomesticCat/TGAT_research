@@ -201,9 +201,68 @@ class EnhancedMemoryOptimizedDataLoader:
             # 創建副本以避免 SettingWithCopyWarning
             self.features = self.features.copy()
             
+            # 檢測並處理無限值和極端值
+            num_features_cleaned = num_features.copy()
+            
+            # 替換無限值和NaN為該列的中位數
+            for col in num_features_cleaned.columns:
+                # 獲取有限值的掩碼
+                mask_inf = np.isinf(num_features_cleaned[col])
+                mask_nan = np.isnan(num_features_cleaned[col])
+                mask_large = np.abs(num_features_cleaned[col]) > 1e30  # 過大的值
+                
+                if mask_inf.any() or mask_nan.any() or mask_large.any():
+                    # 組合所有問題值的掩碼
+                    mask_invalid = mask_inf | mask_nan | mask_large
+                    
+                    # 計算有效值的中位數
+                    valid_values = num_features_cleaned.loc[~mask_invalid, col]
+                    if len(valid_values) > 0:
+                        median_value = valid_values.median()
+                    else:
+                        median_value = 0  # 如果沒有有效值，使用0
+                    
+                    # 替換無效值
+                    num_features_cleaned.loc[mask_invalid, col] = median_value
+                    
+                    logger.warning(f"列 '{col}' 中發現 {mask_invalid.sum()} 個無效值 (inf/NaN/極大值)，已替換為中位數 {median_value}")
+                    
+                # 將值限制在合理範圍內
+                upper_limit = num_features_cleaned[col].quantile(0.99) * 1.5
+                lower_limit = num_features_cleaned[col].quantile(0.01) * 0.5
+                
+                # 處理極端值的邊界情況
+                if upper_limit == lower_limit:
+                    # 如果上下限相同，擴大範圍
+                    if upper_limit == 0:
+                        upper_limit = 1
+                        lower_limit = -1
+                    else:
+                        upper_limit = upper_limit * 2
+                        lower_limit = lower_limit * 0.5
+                
+                # 截斷極端值
+                num_features_cleaned[col] = num_features_cleaned[col].clip(lower_limit, upper_limit)
+            
             # 標準化數值特徵
-            num_cols = num_features.columns
-            self.features[num_cols] = self.scaler.fit_transform(num_features)
+            num_cols = num_features_cleaned.columns
+            try:
+                # 嘗試標準化
+                scaled_features = self.scaler.fit_transform(num_features_cleaned)
+                self.features[num_cols] = scaled_features
+            except Exception as e:
+                logger.error(f"標準化特徵時發生錯誤: {str(e)}")
+                # 回退策略：如果標準化失敗，使用最小最大縮放
+                for i, col in enumerate(num_cols):
+                    col_min = num_features_cleaned[col].min()
+                    col_max = num_features_cleaned[col].max()
+                    # 避免除以零
+                    if col_max > col_min:
+                        self.features[col] = (num_features_cleaned[col] - col_min) / (col_max - col_min)
+                    else:
+                        self.features[col] = 0  # 如果所有值相同，設為0
+                
+                logger.warning("使用最小最大縮放替代標準化")
             
         # 編碼分類目標
         if not pd.api.types.is_numeric_dtype(self.target):
