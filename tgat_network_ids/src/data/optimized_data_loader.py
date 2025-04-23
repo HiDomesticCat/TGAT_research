@@ -411,9 +411,15 @@ class EnhancedMemoryOptimizedDataLoader:
     def _check_preprocessed_exists(self):
         """檢查預處理資料是否存在"""
         feature_path = os.path.join(self.preprocessed_path, 'features.parquet')
+        feature_csv_path = os.path.join(self.preprocessed_path, 'features.csv')
         target_path = os.path.join(self.preprocessed_path, 'target.parquet')
+        target_csv_path = os.path.join(self.preprocessed_path, 'target.csv')
         
-        return os.path.exists(feature_path) and os.path.exists(target_path)
+        # 檢查 parquet 或 csv 格式檔案是否存在
+        features_exist = os.path.exists(feature_path) or os.path.exists(feature_csv_path)
+        target_exist = os.path.exists(target_path) or os.path.exists(target_csv_path)
+        
+        return features_exist and target_exist
         
     def _save_preprocessed_data(self):
         """保存預處理後的資料"""
@@ -421,12 +427,40 @@ class EnhancedMemoryOptimizedDataLoader:
         if not os.path.exists(self.preprocessed_path):
             os.makedirs(self.preprocessed_path)
             
-        # 保存特徵和目標
-        feature_path = os.path.join(self.preprocessed_path, 'features.parquet')
-        target_path = os.path.join(self.preprocessed_path, 'target.parquet')
+        # 將所有類別列轉換為字符串，避免保存問題
+        features_processed = self.features.copy()
         
-        self.features.to_parquet(feature_path, index=False)
-        pd.DataFrame({'target': self.target}).to_parquet(target_path, index=False)
+        # 處理類別列，確保一致性
+        for col in features_processed.select_dtypes(include=['category']).columns:
+            logger.info(f"轉換類別列 '{col}' 為字符串類型")
+            try:
+                features_processed[col] = features_processed[col].astype(str)
+            except Exception as e:
+                logger.warning(f"轉換列 '{col}' 失敗: {str(e)}，將嘗試移除")
+                features_processed = features_processed.drop(columns=[col])
+        
+        # 保存CSV格式作為備份
+        feature_csv_path = os.path.join(self.preprocessed_path, 'features.csv')
+        target_csv_path = os.path.join(self.preprocessed_path, 'target.csv')
+        
+        logger.info(f"保存預處理特徵為CSV: {feature_csv_path}")
+        features_processed.to_csv(feature_csv_path, index=False)
+        
+        logger.info(f"保存預處理目標為CSV: {target_csv_path}")
+        pd.DataFrame({'target': self.target}).to_csv(target_csv_path, index=False)
+        
+        # 嘗試保存為Parquet格式
+        try:
+            feature_path = os.path.join(self.preprocessed_path, 'features.parquet')
+            target_path = os.path.join(self.preprocessed_path, 'target.parquet')
+            
+            logger.info(f"嘗試保存預處理特徵為Parquet: {feature_path}")
+            features_processed.to_parquet(feature_path, index=False)
+            
+            logger.info(f"嘗試保存預處理目標為Parquet: {target_path}")
+            pd.DataFrame({'target': self.target}).to_parquet(target_path, index=False)
+        except Exception as e:
+            logger.warning(f"保存Parquet格式失敗: {str(e)}，已使用CSV格式作為備份")
         
         # 保存編碼器和縮放器
         with open(os.path.join(self.preprocessed_path, 'scaler.pkl'), 'wb') as f:
@@ -440,12 +474,35 @@ class EnhancedMemoryOptimizedDataLoader:
     def _load_preprocessed_data(self):
         """載入預處理後的資料"""
         try:
+            # 嘗試先讀取parquet格式
             feature_path = os.path.join(self.preprocessed_path, 'features.parquet')
             target_path = os.path.join(self.preprocessed_path, 'target.parquet')
             
-            self.features = pd.read_parquet(feature_path)
-            target_df = pd.read_parquet(target_path)
-            self.target = target_df['target']
+            feature_csv_path = os.path.join(self.preprocessed_path, 'features.csv')
+            target_csv_path = os.path.join(self.preprocessed_path, 'target.csv')
+            
+            # 嘗試讀取parquet格式，如果失敗則回退到CSV格式
+            try:
+                if os.path.exists(feature_path):
+                    self.features = pd.read_parquet(feature_path)
+                    logger.info(f"從Parquet格式載入特徵: {feature_path}")
+                else:
+                    self.features = pd.read_csv(feature_csv_path)
+                    logger.info(f"從CSV格式載入特徵: {feature_csv_path}")
+                    
+                if os.path.exists(target_path):
+                    target_df = pd.read_parquet(target_path)
+                    logger.info(f"從Parquet格式載入目標: {target_path}")
+                else:
+                    target_df = pd.read_csv(target_csv_path)
+                    logger.info(f"從CSV格式載入目標: {target_csv_path}")
+                    
+                self.target = target_df['target']
+            except Exception as e:
+                logger.warning(f"讀取預處理資料失敗: {str(e)}，嘗試使用CSV備份")
+                self.features = pd.read_csv(feature_csv_path)
+                target_df = pd.read_csv(target_csv_path)
+                self.target = target_df['target']
             
             # 儲存特徵名稱
             self.feature_names = list(self.features.columns)
@@ -525,7 +582,7 @@ class EnhancedMemoryOptimizedDataLoader:
             # 唯一值較少的列使用分類類型 (調整閾值以更積極地使用category)
             if unique_ratio < 0.7:  # 原為0.5，現在更積極使用category
                 df_optimized[col] = df_optimized[col].astype('category')
-        
+                
         # 計算優化後的記憶體使用
         end_mem = df_optimized.memory_usage(deep=True).sum() / (1024 * 1024)
         logger.info(f"優化後 DataFrame 記憶體使用: {end_mem:.2f} MB")
@@ -536,159 +593,7 @@ class EnhancedMemoryOptimizedDataLoader:
             gc.collect()
         
         return df_optimized
-
-    def _process_parquet_with_polars(self, parquet_files):
-        """使用Polars高效處理Parquet文件"""
-        logger.info(f"使用Polars處理 {len(parquet_files)} 個Parquet文件")
         
-        if not POLARS_AVAILABLE:
-            logger.warning("Polars不可用，回退到PyArrow處理")
-            return False
-            
-        try:
-            # 使用Polars的LazyFrame高效讀取Parquet
-            dfs = []
-            
-            for i, parquet_file in enumerate(tqdm(parquet_files, desc="Polars讀取Parquet")):
-                try:
-                    # 使用scan_parquet比直接read_parquet更節省記憶體
-                    lf = pl.scan_parquet(parquet_file)
-                    
-                    # 應用採樣（如果需要）
-                    if self.use_sampling and self.sampling_strategy == 'random':
-                        lf = lf.sample(fraction=self.sampling_ratio)
-                        
-                    # 收集DataFrame - 使用批次以節省記憶體
-                    df = lf.collect()
-                    dfs.append(df)
-                    
-                    logger.info(f"Polars成功讀取Parquet: {parquet_file}, 形狀: {df.shape}")
-                    
-                    # 定期釋放記憶體
-                    if (i + 1) % 3 == 0:
-                        # 合併已處理的DataFrame
-                        if len(dfs) > 1:
-                            combined = pl.concat(dfs)
-                            dfs = [combined]
-                            
-                        # 強制垃圾回收
-                        gc.collect()
-                except Exception as e:
-                    logger.error(f"Polars讀取Parquet失敗 {parquet_file}: {str(e)}")
-                    
-            # 合併所有DataFrame
-            if dfs:
-                logger.info(f"合併 {len(dfs)} 個Polars DataFrame")
-                
-                # 使用concat而非較慢的vstack
-                if len(dfs) > 1:
-                    combined_df = pl.concat(dfs)
-                else:
-                    combined_df = dfs[0]
-                
-                # 對於分層採樣，在這裡處理
-                if self.use_sampling and self.sampling_strategy == 'stratified' and 'label' in combined_df.columns:
-                    # 對每個類別單獨採樣
-                    sampled_dfs = []
-                    
-                    # 獲取唯一標籤
-                    labels = combined_df.select('label').unique().to_series()
-                    
-                    for lbl in labels:
-                        # 過濾單一類別的資料
-                        class_df = combined_df.filter(pl.col('label') == lbl)
-                        class_size = class_df.shape[0]
-                        
-                        # 計算採樣數量
-                        sample_size = max(
-                            int(class_size * self.sampling_ratio),
-                            min(self.min_samples_per_class, class_size)
-                        )
-                        
-                        # 採樣並添加到結果中
-                        if sample_size < class_size:
-                            sampled_class = class_df.sample(n=sample_size)
-                            sampled_dfs.append(sampled_class)
-                        else:
-                            sampled_dfs.append(class_df)
-                            
-                    # 合併所有採樣後的類別
-                    if sampled_dfs:
-                        combined_df = pl.concat(sampled_dfs)
-                        logger.info(f"分層採樣後大小: {combined_df.shape[0]}")
-                
-                # 轉換為Pandas DataFrame以便與其他代碼兼容
-                self.df = combined_df.to_pandas()
-                logger.info(f"Polars處理完成，DataFrame形狀: {self.df.shape}")
-                
-                # 釋放記憶體
-                del dfs, combined_df
-                gc.collect()
-                
-                return True
-            else:
-                logger.warning("Polars處理未產生任何有效資料")
-                return False
-                
-        except Exception as e:
-            logger.error(f"Polars處理Parquet文件過程中發生錯誤: {str(e)}")
-            return False
-        
-    def _load_with_polars(self, file_list):
-        """使用Polars高效載入多個文件"""
-        logger.info(f"使用Polars載入 {len(file_list)} 個文件")
-        
-        try:
-            # 使用Polars的lazy執行模式逐個載入文件
-            dfs = []
-            for i, file_path in enumerate(tqdm(file_list, desc="使用Polars載入")):
-                try:
-                    # 使用LazyFrame進行高效讀取和處理
-                    lf = pl.scan_csv(file_path)
-                    
-                    # 應用篩選(如果需要)
-                    if self.use_sampling:
-                        if self.sampling_strategy == 'random':
-                            # 隨機採樣
-                            lf = lf.sample(fraction=self.sampling_ratio)
-                        # 注意：Polars的lazy API不直接支持分層採樣，需在收集後處理
-                    
-                    # 收集DataFrame
-                    df = lf.collect()
-                    dfs.append(df)
-                    
-                    logger.info(f"Polars成功載入: {file_path}, 形狀: {df.shape}")
-                    
-                    # 定期釋放記憶體
-                    if (i + 1) % 3 == 0:
-                        gc.collect()
-                except Exception as e:
-                    logger.error(f"Polars載入 {file_path} 失敗: {str(e)}")
-            
-            # 合併所有DataFrame
-            if dfs:
-                logger.info(f"合併 {len(dfs)} 個Polars DataFrame")
-                combined_df = pl.concat(dfs)
-                
-                # 將Polars DataFrame轉換為Pandas DataFrame(保持與其他代碼兼容)
-                self.df = combined_df.to_pandas()
-                logger.info(f"合併完成，DataFrame形狀: {self.df.shape}")
-                
-                # 釋放記憶體
-                del dfs, combined_df
-                gc.collect()
-            else:
-                raise ValueError("所有文件均載入失敗")
-                
-        except Exception as e:
-            logger.error(f"Polars載入過程中發生錯誤: {str(e)}")
-            logger.info("回退到標準載入方法")
-            
-            if self.incremental_loading:
-                self._load_with_incremental_processing(file_list)
-            else:
-                self._load_data_at_once(file_list)
-                
     def _load_with_incremental_processing(self, file_list):
         """增強版增量式加載多個文件 - 使用更高效的串流處理"""
         logger.info(f"增量式加載 {len(file_list)} 個文件 (增強串流處理)")
@@ -841,7 +746,7 @@ class EnhancedMemoryOptimizedDataLoader:
             gc.collect()
         else:
             raise ValueError("所有文件均載入失敗")
-    
+            
     def _load_single_file_with_polars(self, file_path):
         """使用Polars高效載入單個文件"""
         logger.info(f"使用Polars載入單個文件: {file_path}")
@@ -873,3 +778,155 @@ class EnhancedMemoryOptimizedDataLoader:
             logger.error(f"Polars載入失敗: {str(e)}")
             logger.info("回退到標準載入方法")
             self._load_single_file_incrementally(file_path)
+            
+    def _load_with_polars(self, file_list):
+        """使用Polars高效載入多個文件"""
+        logger.info(f"使用Polars載入 {len(file_list)} 個文件")
+        
+        try:
+            # 使用Polars的lazy執行模式逐個載入文件
+            dfs = []
+            for i, file_path in enumerate(tqdm(file_list, desc="使用Polars載入")):
+                try:
+                    # 使用LazyFrame進行高效讀取和處理
+                    lf = pl.scan_csv(file_path)
+                    
+                    # 應用篩選(如果需要)
+                    if self.use_sampling:
+                        if self.sampling_strategy == 'random':
+                            # 隨機採樣
+                            lf = lf.sample(fraction=self.sampling_ratio)
+                        # 注意：Polars的lazy API不直接支持分層採樣，需在收集後處理
+                    
+                    # 收集DataFrame
+                    df = lf.collect()
+                    dfs.append(df)
+                    
+                    logger.info(f"Polars成功載入: {file_path}, 形狀: {df.shape}")
+                    
+                    # 定期釋放記憶體
+                    if (i + 1) % 3 == 0:
+                        gc.collect()
+                except Exception as e:
+                    logger.error(f"Polars載入 {file_path} 失敗: {str(e)}")
+            
+            # 合併所有DataFrame
+            if dfs:
+                logger.info(f"合併 {len(dfs)} 個Polars DataFrame")
+                combined_df = pl.concat(dfs)
+                
+                # 將Polars DataFrame轉換為Pandas DataFrame(保持與其他代碼兼容)
+                self.df = combined_df.to_pandas()
+                logger.info(f"合併完成，DataFrame形狀: {self.df.shape}")
+                
+                # 釋放記憶體
+                del dfs, combined_df
+                gc.collect()
+            else:
+                raise ValueError("所有文件均載入失敗")
+                
+        except Exception as e:
+            logger.error(f"Polars載入過程中發生錯誤: {str(e)}")
+            logger.info("回退到標準載入方法")
+            
+            if self.incremental_loading:
+                self._load_with_incremental_processing(file_list)
+            else:
+                self._load_data_at_once(file_list)
+                
+    def _process_parquet_with_polars(self, parquet_files):
+        """使用Polars高效處理Parquet文件"""
+        logger.info(f"使用Polars處理 {len(parquet_files)} 個Parquet文件")
+        
+        if not POLARS_AVAILABLE:
+            logger.warning("Polars不可用，回退到PyArrow處理")
+            return False
+            
+        try:
+            # 使用Polars的LazyFrame高效讀取Parquet
+            dfs = []
+            
+            for i, parquet_file in enumerate(tqdm(parquet_files, desc="Polars讀取Parquet")):
+                try:
+                    # 使用scan_parquet比直接read_parquet更節省記憶體
+                    lf = pl.scan_parquet(parquet_file)
+                    
+                    # 應用採樣（如果需要）
+                    if self.use_sampling and self.sampling_strategy == 'random':
+                        lf = lf.sample(fraction=self.sampling_ratio)
+                        
+                    # 收集DataFrame - 使用批次以節省記憶體
+                    df = lf.collect()
+                    dfs.append(df)
+                    
+                    logger.info(f"Polars成功讀取Parquet: {parquet_file}, 形狀: {df.shape}")
+                    
+                    # 定期釋放記憶體
+                    if (i + 1) % 3 == 0:
+                        # 合併已處理的DataFrame
+                        if len(dfs) > 1:
+                            combined = pl.concat(dfs)
+                            dfs = [combined]
+                            
+                        # 強制垃圾回收
+                        gc.collect()
+                except Exception as e:
+                    logger.error(f"Polars讀取Parquet失敗 {parquet_file}: {str(e)}")
+                    
+            # 合併所有DataFrame
+            if dfs:
+                logger.info(f"合併 {len(dfs)} 個Polars DataFrame")
+                
+                # 使用concat而非較慢的vstack
+                if len(dfs) > 1:
+                    combined_df = pl.concat(dfs)
+                else:
+                    combined_df = dfs[0]
+                
+                # 對於分層採樣，在這裡處理
+                if self.use_sampling and self.sampling_strategy == 'stratified' and 'label' in combined_df.columns:
+                    # 對每個類別單獨採樣
+                    sampled_dfs = []
+                    
+                    # 獲取唯一標籤
+                    labels = combined_df.select('label').unique().to_series()
+                    
+                    for lbl in labels:
+                        # 過濾單一類別的資料
+                        class_df = combined_df.filter(pl.col('label') == lbl)
+                        class_size = class_df.shape[0]
+                        
+                        # 計算採樣數量
+                        sample_size = max(
+                            int(class_size * self.sampling_ratio),
+                            min(self.min_samples_per_class, class_size)
+                        )
+                        
+                        # 採樣並添加到結果中
+                        if sample_size < class_size:
+                            sampled_class = class_df.sample(n=sample_size)
+                            sampled_dfs.append(sampled_class)
+                        else:
+                            sampled_dfs.append(class_df)
+                            
+                    # 合併所有採樣後的類別
+                    if sampled_dfs:
+                        combined_df = pl.concat(sampled_dfs)
+                        logger.info(f"分層採樣後大小: {combined_df.shape[0]}")
+                
+                # 轉換為Pandas DataFrame以便與其他代碼兼容
+                self.df = combined_df.to_pandas()
+                logger.info(f"Polars處理完成，DataFrame形狀: {self.df.shape}")
+                
+                # 釋放記憶體
+                del dfs, combined_df
+                gc.collect()
+                
+                return True
+            else:
+                logger.warning("Polars處理未產生任何有效資料")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Polars處理Parquet文件過程中發生錯誤: {str(e)}")
+            return False
