@@ -613,4 +613,19 @@ class EnhancedMemoryOptimizedDataLoader:
                 
                 # 將Polars DataFrame轉換為Pandas DataFrame(保持與其他代碼兼容)
                 self.df = combined_df.to_pandas()
-                logger.info(f"合併完成，
+                logger.info(f"合併完成，DataFrame形狀: {self.df.shape}")
+                
+                # 釋放記憶體
+                del dfs, combined_df
+                gc.collect()
+            else:
+                raise ValueError("所有文件均載入失敗")
+                
+        except Exception as e:
+            logger.error(f"Polars載入過程中發生錯誤: {str(e)}")
+            logger.info("回退到標準載入方法")
+            
+            if self.incremental_loading:
+                self._load_data_incrementally(file_list)
+            else:
+                self._load_data_at_once(file_list)
