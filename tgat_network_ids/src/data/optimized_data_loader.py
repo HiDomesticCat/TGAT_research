@@ -422,7 +422,7 @@ class EnhancedMemoryOptimizedDataLoader:
         return features_exist and target_exist
         
     def _save_preprocessed_data(self):
-        """保存預處理後的資料"""
+        """保存預處理後的資料，並支援斷點續傳功能"""
         # 確保目錄存在
         if not os.path.exists(self.preprocessed_path):
             os.makedirs(self.preprocessed_path)
@@ -430,63 +430,101 @@ class EnhancedMemoryOptimizedDataLoader:
         # 創建一個淺拷貝用於保存，避免修改原始資料
         logger.info("準備保存預處理資料...")
         
+        # 創建檢查點檔案路徑
+        checkpoint_path = os.path.join(self.preprocessed_path, 'checkpoint.json')
+        feature_csv_path = os.path.join(self.preprocessed_path, 'features.csv')
+        target_csv_path = os.path.join(self.preprocessed_path, 'target.csv')
+        
+        # 檢查是否已存在處理檢查點
+        current_chunk = 0
+        if os.path.exists(checkpoint_path):
+            try:
+                import json
+                with open(checkpoint_path, 'r') as f:
+                    checkpoint_data = json.load(f)
+                    current_chunk = checkpoint_data.get('current_chunk', 0)
+                    logger.info(f"發現處理檢查點，將從分塊 {current_chunk} 繼續處理")
+            except Exception as e:
+                logger.warning(f"讀取檢查點文件失敗: {str(e)}，將從頭開始處理")
+                current_chunk = 0
+        
         # 分塊保存策略，避免記憶體溢出
         chunk_size = 1000000  # 每個分塊的行數
         total_rows = len(self.features)
         chunks = list(range(0, total_rows, chunk_size)) + [total_rows]
-        logger.info(f"將分 {len(chunks)-1} 批次保存 {total_rows} 筆資料")
+        total_chunks = len(chunks) - 1
+        logger.info(f"將分 {total_chunks} 批次保存 {total_rows} 筆資料，從第 {current_chunk} 批次開始")
         
         # 特別處理IP地址和其他大量唯一值的欄位
         ip_cols = [col for col in self.features.columns if 'IP' in col or 'HTTP' in col or 'Simillar' in col]
         if ip_cols:
             logger.info(f"檢測到可能包含大量唯一值的欄位: {ip_cols}")
         
-        # 保存CSV格式，使用分塊機制
-        feature_csv_path = os.path.join(self.preprocessed_path, 'features.csv')
-        target_csv_path = os.path.join(self.preprocessed_path, 'target.csv')
-        
-        # 先寫入標頭
-        with open(feature_csv_path, 'w') as f:
-            self.features.iloc[0:0].to_csv(f, index=False)
+        # 如果是從頭開始，則先寫入標頭
+        if current_chunk == 0:
+            with open(feature_csv_path, 'w') as f:
+                self.features.iloc[0:0].to_csv(f, index=False)
+                
+            # 保存目標變數 (通常體積較小，可一次處理)
+            pd.DataFrame({'target': self.target}).to_csv(target_csv_path, index=False)
+            logger.info(f"目標資料已保存至CSV: {target_csv_path}")
+        else:
+            # 如果是繼續處理，則使用追加模式
+            logger.info(f"繼續向 {feature_csv_path} 追加資料")
             
         # 分塊保存特徵資料
-        for i in range(len(chunks)-1):
+        import json
+        for i in range(current_chunk, total_chunks):
             start_idx = chunks[i]
             end_idx = chunks[i+1]
             
-            # 取出當前分塊
-            chunk = self.features.iloc[start_idx:end_idx].copy()
-            
-            # 針對類別列的特殊處理，避免記憶體暴增
-            for col in chunk.select_dtypes(include=['category']).columns:
-                if col in ip_cols:
-                    # 對於 IP 地址或大量唯一值的列，使用較節省記憶體的方法
-                    logger.info(f"使用記憶體優化方法處理大量唯一值欄位: '{col}'")
-                    # 維持原始編碼，不轉字串
-                    pass
-                else:
-                    # 其他類別列可以安全地轉換為字串
-                    try:
-                        chunk[col] = chunk[col].astype(str)
-                    except Exception as e:
-                        logger.warning(f"轉換列 '{col}' 失敗: {str(e)}，保持原狀")
-            
-            # 追加到CSV
-            with open(feature_csv_path, 'a') as f:
-                chunk.to_csv(f, index=False, header=False)
+            try:
+                # 取出當前分塊
+                chunk = self.features.iloc[start_idx:end_idx].copy()
                 
-            logger.info(f"已保存分塊 {i+1}/{len(chunks)-1}: 行 {start_idx}-{end_idx}")
-            
-            # 強制釋放記憶體
-            del chunk
-            gc.collect()
-            print_memory_usage()
+                # 針對類別列的特殊處理，避免記憶體暴增
+                for col in chunk.select_dtypes(include=['category']).columns:
+                    if col in ip_cols:
+                        # 對於 IP 地址或大量唯一值的列，使用較節省記憶體的方法
+                        logger.info(f"使用記憶體優化方法處理大量唯一值欄位: '{col}'")
+                        # 維持原始編碼，不轉字串
+                        pass
+                    else:
+                        # 其他類別列可以安全地轉換為字串
+                        try:
+                            chunk[col] = chunk[col].astype(str)
+                        except Exception as e:
+                            logger.warning(f"轉換列 '{col}' 失敗: {str(e)}，保持原狀")
+                
+                # 追加到CSV
+                with open(feature_csv_path, 'a') as f:
+                    chunk.to_csv(f, index=False, header=False)
+                    
+                logger.info(f"已保存分塊 {i+1}/{total_chunks}: 行 {start_idx}-{end_idx}")
+                
+                # 更新檢查點
+                with open(checkpoint_path, 'w') as f:
+                    json.dump({
+                        'current_chunk': i + 1,
+                        'total_chunks': total_chunks,
+                        'last_processed_row': end_idx,
+                        'total_rows': total_rows,
+                        'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    }, f)
+                    
+                logger.info(f"已更新檢查點: 批次 {i+1}/{total_chunks}")
+                
+                # 強制釋放記憶體
+                del chunk
+                gc.collect()
+                print_memory_usage()
+                
+            except Exception as e:
+                logger.error(f"處理分塊 {i+1} 時發生錯誤: {str(e)}")
+                logger.info(f"已保存檢查點，可在程式重啟後從批次 {i} 繼續處理")
+                raise  # 重新引發異常，讓上層捕獲
         
-        logger.info(f"特徵資料已保存至CSV: {feature_csv_path}")
-        
-        # 保存目標變數 (通常體積較小，可一次處理)
-        pd.DataFrame({'target': self.target}).to_csv(target_csv_path, index=False)
-        logger.info(f"目標資料已保存至CSV: {target_csv_path}")
+        logger.info(f"特徵資料已全部保存至CSV: {feature_csv_path}")
         
         # 嘗試使用 PyArrow 直接保存 parquet (避免 pandas to_parquet 的記憶體問題)
         try:
@@ -522,8 +560,13 @@ class EnhancedMemoryOptimizedDataLoader:
             
         with open(os.path.join(self.preprocessed_path, 'label_encoder.pkl'), 'wb') as f:
             pickle.dump(self.label_encoder, f)
+        
+        # 全部完成後，移除檢查點檔案
+        if os.path.exists(checkpoint_path):
+            os.remove(checkpoint_path)
             
         logger.info(f"預處理資料已全部保存至: {self.preprocessed_path}")
+        logger.info("保存過程已完成，檢查點已清理")
         
     def _load_preprocessed_data(self):
         """載入預處理後的資料"""
