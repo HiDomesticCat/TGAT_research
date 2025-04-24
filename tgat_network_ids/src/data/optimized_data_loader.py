@@ -427,40 +427,94 @@ class EnhancedMemoryOptimizedDataLoader:
         if not os.path.exists(self.preprocessed_path):
             os.makedirs(self.preprocessed_path)
             
-        # 將所有類別列轉換為字符串，避免保存問題
-        features_processed = self.features.copy()
+        # 創建一個淺拷貝用於保存，避免修改原始資料
+        logger.info("準備保存預處理資料...")
         
-        # 處理類別列，確保一致性
-        for col in features_processed.select_dtypes(include=['category']).columns:
-            logger.info(f"轉換類別列 '{col}' 為字符串類型")
-            try:
-                features_processed[col] = features_processed[col].astype(str)
-            except Exception as e:
-                logger.warning(f"轉換列 '{col}' 失敗: {str(e)}，將嘗試移除")
-                features_processed = features_processed.drop(columns=[col])
+        # 分塊保存策略，避免記憶體溢出
+        chunk_size = 1000000  # 每個分塊的行數
+        total_rows = len(self.features)
+        chunks = list(range(0, total_rows, chunk_size)) + [total_rows]
+        logger.info(f"將分 {len(chunks)-1} 批次保存 {total_rows} 筆資料")
         
-        # 保存CSV格式作為備份
+        # 特別處理IP地址和其他大量唯一值的欄位
+        ip_cols = [col for col in self.features.columns if 'IP' in col or 'HTTP' in col or 'Simillar' in col]
+        if ip_cols:
+            logger.info(f"檢測到可能包含大量唯一值的欄位: {ip_cols}")
+        
+        # 保存CSV格式，使用分塊機制
         feature_csv_path = os.path.join(self.preprocessed_path, 'features.csv')
         target_csv_path = os.path.join(self.preprocessed_path, 'target.csv')
         
-        logger.info(f"保存預處理特徵為CSV: {feature_csv_path}")
-        features_processed.to_csv(feature_csv_path, index=False)
+        # 先寫入標頭
+        with open(feature_csv_path, 'w') as f:
+            self.features.iloc[0:0].to_csv(f, index=False)
+            
+        # 分塊保存特徵資料
+        for i in range(len(chunks)-1):
+            start_idx = chunks[i]
+            end_idx = chunks[i+1]
+            
+            # 取出當前分塊
+            chunk = self.features.iloc[start_idx:end_idx].copy()
+            
+            # 針對類別列的特殊處理，避免記憶體暴增
+            for col in chunk.select_dtypes(include=['category']).columns:
+                if col in ip_cols:
+                    # 對於 IP 地址或大量唯一值的列，使用較節省記憶體的方法
+                    logger.info(f"使用記憶體優化方法處理大量唯一值欄位: '{col}'")
+                    # 維持原始編碼，不轉字串
+                    pass
+                else:
+                    # 其他類別列可以安全地轉換為字串
+                    try:
+                        chunk[col] = chunk[col].astype(str)
+                    except Exception as e:
+                        logger.warning(f"轉換列 '{col}' 失敗: {str(e)}，保持原狀")
+            
+            # 追加到CSV
+            with open(feature_csv_path, 'a') as f:
+                chunk.to_csv(f, index=False, header=False)
+                
+            logger.info(f"已保存分塊 {i+1}/{len(chunks)-1}: 行 {start_idx}-{end_idx}")
+            
+            # 強制釋放記憶體
+            del chunk
+            gc.collect()
+            print_memory_usage()
         
-        logger.info(f"保存預處理目標為CSV: {target_csv_path}")
+        logger.info(f"特徵資料已保存至CSV: {feature_csv_path}")
+        
+        # 保存目標變數 (通常體積較小，可一次處理)
         pd.DataFrame({'target': self.target}).to_csv(target_csv_path, index=False)
+        logger.info(f"目標資料已保存至CSV: {target_csv_path}")
         
-        # 嘗試保存為Parquet格式
+        # 嘗試使用 PyArrow 直接保存 parquet (避免 pandas to_parquet 的記憶體問題)
         try:
+            import pyarrow as pa
+            import pyarrow.parquet as pq
+            import pyarrow.csv as csv
+            
+            logger.info("使用 PyArrow 保存 Parquet 格式...")
             feature_path = os.path.join(self.preprocessed_path, 'features.parquet')
+            
+            # 使用 PyArrow 直接從 CSV 讀取並轉換為 Parquet
+            logger.info("從 CSV 轉換為 Parquet (使用 PyArrow)...")
+            
+            # 使用 PyArrow CSV 讀取器，批次讀取
+            table = csv.read_csv(feature_csv_path, read_options=pa.csv.ReadOptions(block_size=10*1024*1024))
+            
+            # 寫入 Parquet
+            pq.write_table(table, feature_path, compression='snappy')
+            
+            # 目標資料轉換為 Parquet
             target_path = os.path.join(self.preprocessed_path, 'target.parquet')
+            target_table = csv.read_csv(target_csv_path)
+            pq.write_table(target_table, target_path, compression='snappy')
             
-            logger.info(f"嘗試保存預處理特徵為Parquet: {feature_path}")
-            features_processed.to_parquet(feature_path, index=False)
+            logger.info(f"資料已成功保存為 Parquet 格式: {feature_path}")
             
-            logger.info(f"嘗試保存預處理目標為Parquet: {target_path}")
-            pd.DataFrame({'target': self.target}).to_parquet(target_path, index=False)
         except Exception as e:
-            logger.warning(f"保存Parquet格式失敗: {str(e)}，已使用CSV格式作為備份")
+            logger.warning(f"使用 PyArrow 保存 Parquet 格式失敗: {str(e)}，僅使用 CSV 格式")
         
         # 保存編碼器和縮放器
         with open(os.path.join(self.preprocessed_path, 'scaler.pkl'), 'wb') as f:
@@ -469,7 +523,7 @@ class EnhancedMemoryOptimizedDataLoader:
         with open(os.path.join(self.preprocessed_path, 'label_encoder.pkl'), 'wb') as f:
             pickle.dump(self.label_encoder, f)
             
-        logger.info(f"預處理資料已保存至: {self.preprocessed_path}")
+        logger.info(f"預處理資料已全部保存至: {self.preprocessed_path}")
         
     def _load_preprocessed_data(self):
         """載入預處理後的資料"""
