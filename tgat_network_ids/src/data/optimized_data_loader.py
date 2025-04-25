@@ -526,33 +526,23 @@ class EnhancedMemoryOptimizedDataLoader:
         
         logger.info(f"特徵資料已全部保存至CSV: {feature_csv_path}")
         
-        # 嘗試使用 PyArrow 直接保存 parquet (避免 pandas to_parquet 的記憶體問題)
-        try:
-            import pyarrow as pa
-            import pyarrow.parquet as pq
-            import pyarrow.csv as csv
+        # 完全依賴 CSV 格式，不嘗試轉換為 Parquet（避免記憶體溢出）
+        logger.info("由於記憶體限制，跳過 Parquet 格式轉換，僅使用 CSV 格式儲存")
+        feature_path = os.path.join(self.preprocessed_path, 'features.csv')
+        target_path = os.path.join(self.preprocessed_path, 'target.csv')
+        
+        # 為了與現有程式碼相容，創建符號連結
+        feature_parquet_path = os.path.join(self.preprocessed_path, 'features.parquet.unavailable')
+        target_parquet_path = os.path.join(self.preprocessed_path, 'target.parquet.unavailable')
+        
+        # 創建標記文件，表示 Parquet 格式不可用
+        with open(feature_parquet_path, 'w') as f:
+            f.write("Parquet format unavailable due to memory constraints. Use CSV format instead.")
             
-            logger.info("使用 PyArrow 保存 Parquet 格式...")
-            feature_path = os.path.join(self.preprocessed_path, 'features.parquet')
+        with open(target_parquet_path, 'w') as f:
+            f.write("Parquet format unavailable due to memory constraints. Use CSV format instead.")
             
-            # 使用 PyArrow 直接從 CSV 讀取並轉換為 Parquet
-            logger.info("從 CSV 轉換為 Parquet (使用 PyArrow)...")
-            
-            # 使用 PyArrow CSV 讀取器，批次讀取
-            table = csv.read_csv(feature_csv_path, read_options=pa.csv.ReadOptions(block_size=10*1024*1024))
-            
-            # 寫入 Parquet
-            pq.write_table(table, feature_path, compression='snappy')
-            
-            # 目標資料轉換為 Parquet
-            target_path = os.path.join(self.preprocessed_path, 'target.parquet')
-            target_table = csv.read_csv(target_csv_path)
-            pq.write_table(target_table, target_path, compression='snappy')
-            
-            logger.info(f"資料已成功保存為 Parquet 格式: {feature_path}")
-            
-        except Exception as e:
-            logger.warning(f"使用 PyArrow 保存 Parquet 格式失敗: {str(e)}，僅使用 CSV 格式")
+        logger.info(f"已創建標記文件，標示 Parquet 格式不可用: {feature_parquet_path}")
         
         # 保存編碼器和縮放器
         with open(os.path.join(self.preprocessed_path, 'scaler.pkl'), 'wb') as f:
