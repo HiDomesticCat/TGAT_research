@@ -569,52 +569,133 @@ class EnhancedMemoryOptimizedDataLoader:
         logger.info("保存過程已完成，檢查點已清理")
         
     def _load_preprocessed_data(self):
-        """載入預處理後的資料"""
+        """載入預處理後的資料，並嘗試恢復任何缺少的預處理工具"""
+        # 檢查必要的檔案路徑
+        feature_path = os.path.join(self.preprocessed_path, 'features.parquet')
+        target_path = os.path.join(self.preprocessed_path, 'target.parquet')
+        feature_csv_path = os.path.join(self.preprocessed_path, 'features.csv')
+        target_csv_path = os.path.join(self.preprocessed_path, 'target.csv')
+        scaler_path = os.path.join(self.preprocessed_path, 'scaler.pkl')
+        encoder_path = os.path.join(self.preprocessed_path, 'label_encoder.pkl')
+        
+        # 追蹤加載進度
+        features_loaded = False
+        target_loaded = False
+        scaler_loaded = False
+        encoder_loaded = False
+        
+        # 嘗試載入特徵數據
         try:
-            # 嘗試先讀取parquet格式
-            feature_path = os.path.join(self.preprocessed_path, 'features.parquet')
-            target_path = os.path.join(self.preprocessed_path, 'target.parquet')
-            
-            feature_csv_path = os.path.join(self.preprocessed_path, 'features.csv')
-            target_csv_path = os.path.join(self.preprocessed_path, 'target.csv')
-            
-            # 嘗試讀取parquet格式，如果失敗則回退到CSV格式
-            try:
-                if os.path.exists(feature_path):
-                    self.features = pd.read_parquet(feature_path)
-                    logger.info(f"從Parquet格式載入特徵: {feature_path}")
-                else:
-                    self.features = pd.read_csv(feature_csv_path)
-                    logger.info(f"從CSV格式載入特徵: {feature_csv_path}")
-                    
-                if os.path.exists(target_path):
-                    target_df = pd.read_parquet(target_path)
-                    logger.info(f"從Parquet格式載入目標: {target_path}")
-                else:
-                    target_df = pd.read_csv(target_csv_path)
-                    logger.info(f"從CSV格式載入目標: {target_csv_path}")
-                    
-                self.target = target_df['target']
-            except Exception as e:
-                logger.warning(f"讀取預處理資料失敗: {str(e)}，嘗試使用CSV備份")
+            if os.path.exists(feature_path):
+                self.features = pd.read_parquet(feature_path)
+                logger.info(f"從Parquet格式載入特徵: {feature_path}")
+                features_loaded = True
+            elif os.path.exists(feature_csv_path):
                 self.features = pd.read_csv(feature_csv_path)
-                target_df = pd.read_csv(target_csv_path)
-                self.target = target_df['target']
+                logger.info(f"從CSV格式載入特徵: {feature_csv_path}")
+                features_loaded = True
+            else:
+                logger.warning("未找到特徵資料文件")
+        except Exception as e:
+            logger.warning(f"載入特徵資料時出錯: {str(e)}")
             
+        # 嘗試載入目標數據
+        try:
+            if os.path.exists(target_path):
+                target_df = pd.read_parquet(target_path)
+                logger.info(f"從Parquet格式載入目標: {target_path}")
+                self.target = target_df['target']
+                target_loaded = True
+            elif os.path.exists(target_csv_path):
+                target_df = pd.read_csv(target_csv_path)
+                logger.info(f"從CSV格式載入目標: {target_csv_path}")
+                self.target = target_df['target']
+                target_loaded = True
+            else:
+                logger.warning("未找到目標資料文件")
+        except Exception as e:
+            logger.warning(f"載入目標資料時出錯: {str(e)}")
+            
+        # 如果特徵和目標都成功載入，則繼續處理
+        if features_loaded and target_loaded:
             # 儲存特徵名稱
             self.feature_names = list(self.features.columns)
             
-            # 載入編碼器和縮放器
-            with open(os.path.join(self.preprocessed_path, 'scaler.pkl'), 'rb') as f:
-                self.scaler = pickle.load(f)
+            # 嘗試載入縮放器
+            try:
+                if os.path.exists(scaler_path):
+                    with open(scaler_path, 'rb') as f:
+                        self.scaler = pickle.load(f)
+                    logger.info(f"成功載入縮放器: {scaler_path}")
+                    scaler_loaded = True
+                else:
+                    logger.warning(f"找不到縮放器文件: {scaler_path}，將重新建立")
+            except Exception as e:
+                logger.warning(f"載入縮放器時出錯: {str(e)}，將重新建立")
                 
-            with open(os.path.join(self.preprocessed_path, 'label_encoder.pkl'), 'rb') as f:
-                self.label_encoder = pickle.load(f)
-                
-            logger.info(f"預處理資料載入成功: 特徵形狀={self.features.shape}, 目標形狀={self.target.shape}")
+            # 嘗試載入標籤編碼器
+            try:
+                if os.path.exists(encoder_path):
+                    with open(encoder_path, 'rb') as f:
+                        self.label_encoder = pickle.load(f)
+                    logger.info(f"成功載入標籤編碼器: {encoder_path}")
+                    encoder_loaded = True
+                else:
+                    logger.warning(f"找不到標籤編碼器文件: {encoder_path}，將重新建立")
+            except Exception as e:
+                logger.warning(f"載入標籤編碼器時出錯: {str(e)}，將重新建立")
+            
+            # 如果缺少縮放器，嘗試從數據重建
+            if not scaler_loaded:
+                try:
+                    logger.info("從載入的數據重建縮放器...")
+                    num_features = self.features.select_dtypes(include=['int', 'float'])
+                    if not num_features.empty:
+                        self.scaler = StandardScaler()
+                        # 只是創建縮放器，但不實際轉換數據（數據已經被處理過）
+                        self.scaler.fit(num_features)
+                        logger.info("成功從現有數據重建縮放器")
+                        # 保存重建的縮放器
+                        with open(scaler_path, 'wb') as f:
+                            pickle.dump(self.scaler, f)
+                        logger.info(f"重建的縮放器已保存至: {scaler_path}")
+                    else:
+                        logger.warning("無法重建縮放器：沒有數值特徵")
+                except Exception as e:
+                    logger.warning(f"重建縮放器時出錯: {str(e)}")
+            
+            # 如果缺少編碼器，嘗試從數據重建
+            if not encoder_loaded:
+                try:
+                    logger.info("從載入的數據重建標籤編碼器...")
+                    if isinstance(self.target, pd.Series):
+                        self.label_encoder = LabelEncoder()
+                        # 如果目標已經是數值型，只需創建一個簡單的映射
+                        if pd.api.types.is_numeric_dtype(self.target):
+                            unique_values = sorted(self.target.unique())
+                            self.label_encoder.classes_ = np.array(unique_values)
+                        else:
+                            # 否則重新編碼
+                            self.label_encoder.fit(self.target)
+                        logger.info("成功從現有數據重建標籤編碼器")
+                        # 保存重建的編碼器
+                        with open(encoder_path, 'wb') as f:
+                            pickle.dump(self.label_encoder, f)
+                        logger.info(f"重建的標籤編碼器已保存至: {encoder_path}")
+                    else:
+                        logger.warning("無法重建標籤編碼器：目標變數格式不正確")
+                except Exception as e:
+                    logger.warning(f"重建標籤編碼器時出錯: {str(e)}")
+            
+            logger.info(f"預處理資料載入完成: 特徵形狀={self.features.shape}, 目標形狀={self.target.shape}")
+            logger.info(f"加載狀態: 特徵={features_loaded}, 目標={target_loaded}, 縮放器={scaler_loaded}, 編碼器={encoder_loaded}")
             return True
-        except Exception as e:
-            logger.error(f"預處理資料載入失敗: {str(e)}")
+        else:
+            # 如果關鍵數據沒有成功載入，則返回失敗
+            missing = []
+            if not features_loaded: missing.append("特徵")
+            if not target_loaded: missing.append("目標")
+            logger.error(f"預處理資料載入失敗：缺少必要的數據文件 ({', '.join(missing)})")
             return False
     
     def _enhanced_optimize_dataframe_memory(self, df):
