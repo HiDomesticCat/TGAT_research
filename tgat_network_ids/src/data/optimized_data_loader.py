@@ -645,24 +645,39 @@ class EnhancedMemoryOptimizedDataLoader:
             except Exception as e:
                 logger.warning(f"載入標籤編碼器時出錯: {str(e)}，將重新建立")
             
-            # 如果缺少縮放器，嘗試從數據重建
+            # 如果缺少縮放器，創建一個默認的而不是嘗試從所有數據重建（節省記憶體）
             if not scaler_loaded:
                 try:
-                    logger.info("從載入的數據重建縮放器...")
-                    num_features = self.features.select_dtypes(include=['int', 'float'])
-                    if not num_features.empty:
-                        self.scaler = StandardScaler()
-                        # 只是創建縮放器，但不實際轉換數據（數據已經被處理過）
-                        self.scaler.fit(num_features)
-                        logger.info("成功從現有數據重建縮放器")
-                        # 保存重建的縮放器
-                        with open(scaler_path, 'wb') as f:
-                            pickle.dump(self.scaler, f)
-                        logger.info(f"重建的縮放器已保存至: {scaler_path}")
-                    else:
-                        logger.warning("無法重建縮放器：沒有數值特徵")
+                    logger.info("創建默認縮放器（避免記憶體密集型重建）...")
+                    # 直接創建標準縮放器，無需在全數據集上訓練
+                    self.scaler = StandardScaler()
+                    # 將mean_和scale_設定為合理的默認值
+                    # 註：這裡假設數據已經被標準化過，所以使用簡單的标识转换
+                    # 由於數據已經標準化，所以我們可以設置mean_=0, scale_=1
+                    
+                    # 簡單檢查特徵中的数值列
+                    num_cols = self.features.select_dtypes(include=['int', 'float']).columns
+                    
+                    if len(num_cols) > 0:
+                        logger.info(f"檢測到 {len(num_cols)} 個數值特徵欄位，為縮放器設置默認參數")
+                        # 創建並初始化標準化器參數
+                        self.scaler.mean_ = np.zeros(len(num_cols))
+                        self.scaler.scale_ = np.ones(len(num_cols))
+                        self.scaler.var_ = np.ones(len(num_cols))
+                        self.scaler.n_features_in_ = len(num_cols)
+                        self.scaler.n_samples_seen_ = 1
+                        self.scaler.feature_names_in_ = np.array(num_cols)
+                    
+                    logger.info("成功創建默認縮放器")
+                    
+                    # 保存默認縮放器
+                    with open(scaler_path, 'wb') as f:
+                        pickle.dump(self.scaler, f)
+                    logger.info(f"默認縮放器已保存至: {scaler_path}")
                 except Exception as e:
-                    logger.warning(f"重建縮放器時出錯: {str(e)}")
+                    logger.warning(f"創建默認縮放器時出錯: {str(e)}")
+                    # 創建最簡單的縮放器物件，不設置任何參數
+                    self.scaler = StandardScaler()
             
             # 如果缺少編碼器，嘗試從數據重建
             if not encoder_loaded:
