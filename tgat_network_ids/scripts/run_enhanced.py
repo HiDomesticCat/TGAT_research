@@ -116,9 +116,8 @@ def setup_output_dirs(config):
     
     return model_dir, results_dir, vis_dir, output_dir
 
-# @track_memory_usage
-def main():    with track_memory_usage('主函數執行'):
-
+# @track_memory_usage  # 原裝飾器（已禁用）
+def main():
     """主函數"""
     # 解析命令行參數
     args = parse_args()
@@ -429,7 +428,12 @@ def main():    with track_memory_usage('主函數執行'):
         
         # 返回主要結果
                 results = {
-        return results
+            result = results
+    # 使用上下文管理器追蹤記憶體使用
+    result = None
+    with track_memory_usage('主函數執行'):
+        result = result
+    return result
             'model_path': model_path,
             'results_path': results_path,
             'accuracy': evaluation_results.get('accuracy', 0),
