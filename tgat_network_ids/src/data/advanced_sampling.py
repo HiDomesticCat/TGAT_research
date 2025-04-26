@@ -633,4 +633,4 @@ class AdvancedGraphSampler:
                 current_nodes = list(current_graph.nodes())
                 node_to_idx = {node: i for i, node in enumerate(current_nodes)}
                 
-                sample_probs = [current_importance.get(node, 0) / importance_sum for
+                sample_probs = [current_importance.get(node, 0) / importance_sum for node in current_nodes]
