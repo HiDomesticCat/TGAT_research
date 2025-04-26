@@ -669,12 +669,12 @@ class EnhancedMemoryOptimizedDataLoader:
         logger.info("保存過程已完成，檢查點已清理")
         
     def _load_preprocessed_data(self):
-        """載入預處理後的資料，並嘗試恢復任何缺少的預處理工具"""
+        """載入預處理後的資料，支援分片文件和嘗試恢復任何缺少的預處理工具"""
         # 檢查必要的檔案路徑
-        feature_path = os.path.join(self.preprocessed_path, 'features.parquet')
-        target_path = os.path.join(self.preprocessed_path, 'target.parquet')
-        feature_csv_path = os.path.join(self.preprocessed_path, 'features.csv')
+        features_dir = os.path.join(self.preprocessed_path, 'features_chunks')
         target_csv_path = os.path.join(self.preprocessed_path, 'target.csv')
+        target_path = os.path.join(self.preprocessed_path, 'target.parquet')
+        metadata_path = os.path.join(self.preprocessed_path, 'features_metadata.json')
         scaler_path = os.path.join(self.preprocessed_path, 'scaler.pkl')
         encoder_path = os.path.join(self.preprocessed_path, 'label_encoder.pkl')
         
@@ -684,20 +684,119 @@ class EnhancedMemoryOptimizedDataLoader:
         scaler_loaded = False
         encoder_loaded = False
         
-        # 嘗試載入特徵數據
-        try:
-            if os.path.exists(feature_path):
-                self.features = pd.read_parquet(feature_path)
-                logger.info(f"從Parquet格式載入特徵: {feature_path}")
-                features_loaded = True
-            elif os.path.exists(feature_csv_path):
-                self.features = pd.read_csv(feature_csv_path)
-                logger.info(f"從CSV格式載入特徵: {feature_csv_path}")
-                features_loaded = True
-            else:
-                logger.warning("未找到特徵資料文件")
-        except Exception as e:
-            logger.warning(f"載入特徵資料時出錯: {str(e)}")
+        # 首先檢查是否使用分片儲存
+        if os.path.exists(features_dir) and os.path.isdir(features_dir):
+            try:
+                logger.info(f"檢測到分片文件目錄，將使用分片載入: {features_dir}")
+                
+                # 檢查元數據是否存在
+                if os.path.exists(metadata_path):
+                    import json
+                    with open(metadata_path, 'r') as f:
+                        metadata = json.load(f)
+                    
+                    logger.info(f"載入特徵元數據: {metadata_path}")
+                    logger.info(f"特徵總數: {len(metadata['columns'])}, 總行數: {metadata['total_rows']}, 分片數: {metadata['total_chunks']}")
+                    
+                    # 獲取所有分片文件
+                    chunk_files = sorted(glob.glob(os.path.join(features_dir, 'chunk_*.parquet')))
+                    
+                    if not chunk_files:
+                        logger.warning("未找到任何特徵分片文件")
+                        return False
+                    
+                    logger.info(f"找到 {len(chunk_files)} 個特徵分片文件")
+                    
+                    # 使用Polars高效載入分片 (如果可用)
+                    if POLARS_AVAILABLE:
+                        logger.info("使用Polars高效載入分片")
+                        dfs = []
+                        
+                        # 逐個載入分片
+                        for i, chunk_file in enumerate(tqdm(chunk_files, desc="載入分片")):
+                            try:
+                                # 使用Polars讀取
+                                chunk_df = pl.read_parquet(chunk_file)
+                                dfs.append(chunk_df)
+                                
+                                # 定期合併以節省記憶體
+                                if (i + 1) % 5 == 0 or i == len(chunk_files) - 1:
+                                    logger.info(f"合併已載入的 {len(dfs)} 個分片")
+                                    combined_df = pl.concat(dfs)
+                                    
+                                    # 如果是第一批，直接賦值
+                                    if not hasattr(self, '_polars_features') or self._polars_features is None:
+                                        self._polars_features = combined_df
+                                    else:
+                                        # 否則追加
+                                        self._polars_features = pl.concat([self._polars_features, combined_df])
+                                    
+                                    # 釋放記憶體
+                                    dfs = []
+                                    del combined_df
+                                    gc.collect()
+                                    print_memory_usage()
+                            except Exception as e:
+                                logger.error(f"載入分片 {chunk_file} 失敗: {str(e)}")
+                        
+                        # 將Polars DataFrame轉換為Pandas
+                        if hasattr(self, '_polars_features') and self._polars_features is not None:
+                            logger.info("將Polars特徵轉換為Pandas DataFrame")
+                            self.features = self._polars_features.to_pandas()
+                            del self._polars_features
+                            gc.collect()
+                            features_loaded = True
+                    else:
+                        # 使用Pandas逐個載入分片
+                        logger.info("使用Pandas載入分片")
+                        dfs = []
+                        
+                        # 逐個載入分片
+                        for i, chunk_file in enumerate(tqdm(chunk_files, desc="載入分片")):
+                            try:
+                                # 使用Pandas讀取
+                                chunk_df = pd.read_parquet(chunk_file)
+                                dfs.append(chunk_df)
+                                
+                                # 定期合併以節省記憶體
+                                if (i + 1) % 5 == 0 or i == len(chunk_files) - 1:
+                                    logger.info(f"合併已載入的 {len(dfs)} 個分片")
+                                    if not hasattr(self, 'features') or self.features is None:
+                                        self.features = pd.concat(dfs, ignore_index=True)
+                                    else:
+                                        self.features = pd.concat([self.features] + dfs, ignore_index=True)
+                                    
+                                    # 釋放記憶體
+                                    dfs = []
+                                    gc.collect()
+                                    print_memory_usage()
+                            except Exception as e:
+                                logger.error(f"載入分片 {chunk_file} 失敗: {str(e)}")
+                        
+                        if hasattr(self, 'features') and self.features is not None:
+                            features_loaded = True
+                else:
+                    logger.warning(f"未找到特徵元數據文件: {metadata_path}")
+            except Exception as e:
+                logger.error(f"分片載入過程中發生錯誤: {str(e)}")
+        else:
+            # 嘗試載入傳統的單一文件特徵
+            try:
+                feature_path = os.path.join(self.preprocessed_path, 'features.parquet')
+                feature_csv_path = os.path.join(self.preprocessed_path, 'features.csv')
+                
+                if os.path.exists(feature_path):
+                    self.features = pd.read_parquet(feature_path)
+                    logger.info(f"從Parquet格式載入特徵: {feature_path}")
+                    features_loaded = True
+                elif os.path.exists(feature_csv_path):
+                    self.features = pd.read_csv(feature_csv_path)
+                    logger.info(f"從CSV格式載入特徵: {feature_csv_path}")
+                    features_loaded = True
+                else:
+                    logger.warning("未找到特徵資料文件")
+            except Exception as e:
+                logger.warning(f"載入特徵資料時出錯: {str(e)}")
             
         # 嘗試載入目標數據
         try:
