@@ -265,6 +265,137 @@ class EnhancedMemoryOptimizedDataLoader:
                 
         return df_processed
     
+    def _perform_statistical_feature_selection(self, df, target, exclude_cols=None):
+        """使用統計方法進行特徵選擇"""
+        import warnings
+        from sklearn.feature_selection import SelectKBest, f_classif, mutual_info_classif, VarianceThreshold
+
+        if exclude_cols is None:
+            exclude_cols = []
+            
+        logger.info("執行基於統計的特徵選擇...")
+        
+        # 建立一個副本以避免修改原始數據
+        df_copy = df.copy()
+        
+        # 分析特徵相關性以檢測多重共線性
+        try:
+            # 僅對數值型列計算相關性矩陣
+            num_cols = df_copy.select_dtypes(include=['int', 'float']).columns
+            if len(num_cols) > 1:
+                corr_matrix = df_copy[num_cols].corr().abs()
+                
+                # 找出高度相關的特徵對 (>0.95)
+                upper_tri = corr_matrix.where(np.triu(np.ones(corr_matrix.shape), k=1).astype(bool))
+                high_corr_pairs = [(corr_matrix.index[i], corr_matrix.columns[j], upper_tri.iloc[i, j]) 
+                                   for i, j in zip(*np.where(upper_tri > 0.95))]
+                
+                if high_corr_pairs:
+                    logger.warning(f"發現 {len(high_corr_pairs)} 對高度相關特徵:")
+                    for col1, col2, corr in high_corr_pairs[:10]:  # 只顯示前10對
+                        logger.warning(f"  - {col1} 與 {col2}: 相關性 = {corr:.3f}")
+                    
+                    # 對於每對高相關特徵，保留方差較大的一個
+                    cols_to_drop = set()
+                    for col1, col2, _ in high_corr_pairs:
+                        if col1 in exclude_cols or col2 in exclude_cols:
+                            continue  # 跳過排除列
+                            
+                        var1 = df_copy[col1].var()
+                        var2 = df_copy[col2].var()
+                        
+                        if var1 >= var2:
+                            cols_to_drop.add(col2)
+                        else:
+                            cols_to_drop.add(col1)
+                    
+                    # 避免刪除已經手動排除的列
+                    cols_to_drop = cols_to_drop - set(exclude_cols)
+                    
+                    if cols_to_drop:
+                        logger.info(f"基於相關性分析移除 {len(cols_to_drop)} 列: {', '.join(list(cols_to_drop)[:5])}...")
+                        df_copy = df_copy.drop(columns=list(cols_to_drop))
+        except Exception as e:
+            logger.warning(f"計算相關性矩陣時出錯: {str(e)}")
+                
+        # 移除低方差特徵
+        try:
+            # 僅處理數值型列
+            num_cols = df_copy.select_dtypes(include=['int', 'float']).columns
+            if len(num_cols) > 0:
+                variance_selector = VarianceThreshold(threshold=0.01)  # 設置方差閾值
+                
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    num_features_selected = variance_selector.fit_transform(df_copy[num_cols])
+                
+                selected_mask = variance_selector.get_support()
+                selected_num_cols = [col for is_selected, col in zip(selected_mask, num_cols) if is_selected]
+                
+                # 計算被刪除的列
+                low_var_cols = [col for is_selected, col in zip(selected_mask, num_cols) if not is_selected]
+                
+                if low_var_cols:
+                    logger.info(f"移除 {len(low_var_cols)} 個低方差特徵: {', '.join(low_var_cols[:5])}...")
+                    high_var_df = df_copy.drop(columns=low_var_cols)
+                    
+                    # 更新DataFrame
+                    df_copy = pd.concat([high_var_df, df_copy.select_dtypes(exclude=['int', 'float'])], axis=1)
+        except Exception as e:
+            logger.warning(f"執行低方差特徵過濾時出錯: {str(e)}")
+                
+        # 基於統計顯著性的特徵選擇
+        try:
+            # 僅處理數值型列
+            num_cols = df_copy.select_dtypes(include=['int', 'float']).columns
+            if len(num_cols) > 0 and len(num_cols) > 0.1 * df.shape[1]:  # 如果數值特徵超過10%
+                X_for_selection = df_copy[num_cols]
+                
+                # 計算特徵重要性分數
+                try:
+                    f_scores, p_values = f_classif(X_for_selection, target)
+                    # 計算互信息
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("ignore")
+                        mi_scores = mutual_info_classif(X_for_selection, target)
+                except Exception as e:
+                    logger.warning(f"計算特徵重要性失敗: {str(e)}")
+                    return df
+                
+                # 創建特徵重要性DataFrame
+                feature_importance = pd.DataFrame({
+                    'Feature': num_cols,
+                    'F_Score': f_scores,
+                    'P_Value': p_values,
+                    'MI_Score': mi_scores
+                })
+                
+                # 根據重要性排序
+                feature_importance = feature_importance.sort_values(by='MI_Score', ascending=False)
+                
+                # 記錄前20個最重要的特徵
+                logger.info("基於互信息的前20個重要特徵:")
+                for i, (feat, score) in enumerate(zip(feature_importance['Feature'].head(20), 
+                                                     feature_importance['MI_Score'].head(20))):
+                    logger.info(f"  {i+1}. {feat}: {score:.6f}")
+                
+                # 識別統計上不顯著的特徵 (p值 > 0.05 且 互信息分數很低)
+                insignificant_features = feature_importance[
+                    (feature_importance['P_Value'] > 0.05) & 
+                    (feature_importance['MI_Score'] < feature_importance['MI_Score'].quantile(0.2))
+                ]['Feature'].tolist()
+                
+                # 避免刪除手動排除的列
+                insignificant_features = [col for col in insignificant_features if col not in exclude_cols]
+                
+                if insignificant_features:
+                    logger.info(f"移除 {len(insignificant_features)} 個統計上不顯著的特徵...")
+                    df_copy = df_copy.drop(columns=insignificant_features)
+        except Exception as e:
+            logger.warning(f"執行基於統計的特徵選擇時出錯: {str(e)}")
+        
+        return df_copy
+        
     def preprocess(self):
         """預處理資料 - 對數值和分類特徵進行標準化和編碼"""
         logger.info("開始預處理資料...")
@@ -298,6 +429,31 @@ class EnhancedMemoryOptimizedDataLoader:
         # 處理IP地址：提取IP地址結構特徵
         logger.info("預處理IP地址列，保留網絡拓撲信息...")
         self.features = self._process_ip_addresses(self.features)
+        
+        # 定義必須保留的關鍵特徵（不應被統計特徵選擇刪除）
+        preserved_columns = []
+        
+        # 保留所有IP地址衍生特徵
+        for col in self.features.columns:
+            if any(suffix in col for suffix in ['_octet', '_subnet', '_is_private', '_is_global']):
+                preserved_columns.append(col)
+        
+        # 保留重要時間特徵
+        time_features = [col for col in self.features.columns 
+                       if any(key in col.lower() for key in ['time', 'duration', 'interval'])]
+        preserved_columns.extend(time_features)
+        
+        logger.info(f"將保留 {len(preserved_columns)} 個關鍵特徵，這些特徵不會被統計特徵選擇刪除")
+        
+        # 執行基於統計的特徵選擇（只有在行數足夠多時才執行，以避免在小樣本上過度擬合）
+        if len(self.target) > 1000:
+            logger.info("執行基於統計的特徵選擇...")
+            self.features = self._perform_statistical_feature_selection(
+                self.features, self.target, exclude_cols=preserved_columns
+            )
+            logger.info(f"統計特徵選擇後的特徵形狀: {self.features.shape}")
+        else:
+            logger.info("樣本數量不足，跳過統計特徵選擇")
         
         # 儲存特徵名稱
         self.feature_names = list(self.features.columns)
