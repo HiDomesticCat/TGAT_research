@@ -168,7 +168,7 @@ def main():
             'test_size': config['data'].get('test_size', 0.2),
             'min_samples_per_class': config['data'].get('min_samples_per_class', 1000),
             # Add other necessary data configuration options
-            'batch_size': config['training'].get('batch_size', 64),
+            'batch_size': config['train'].get('batch_size', 64),  # Changed from 'training' to 'train'
             'memory_optimization': True
         }
     }
@@ -179,7 +179,7 @@ def main():
     if args.use_gpu is not None:
         config['model']['use_gpu'] = args.use_gpu
     if args.epochs:
-        config['training']['epochs'] = args.epochs
+        config['train']['epochs'] = args.epochs  # Changed from 'training' to 'train'
 
     # Set up output directories
     model_dir, results_dir, vis_dir, output_dir = setup_output_dirs(config)
@@ -248,8 +248,8 @@ def main():
         # Set up optimizer
         optimizer = torch.optim.Adam(
             model.parameters(),
-            lr=config['training']['learning_rate'],
-            weight_decay=config['training']['weight_decay']
+            lr=config['train']['learning_rate'],  # Changed from 'training' to 'train'
+            weight_decay=config['train']['weight_decay']  # Changed from 'training' to 'train'
         )
         
         # Set up loss function
@@ -262,7 +262,7 @@ def main():
         if mode == 'train':
             logger.info("Starting model training...")
             # Training logic...
-            epochs = config['training']['epochs']
+            epochs = config['train']['epochs']  # Changed from 'training' to 'train'
             for epoch in range(epochs):
                 logger.info(f"Epoch {epoch+1}/{epochs}")
                 # Train one epoch...
