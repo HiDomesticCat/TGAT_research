@@ -526,23 +526,101 @@ class EnhancedMemoryOptimizedDataLoader:
         
         logger.info(f"特徵資料已全部保存至CSV: {feature_csv_path}")
         
-        # 完全依賴 CSV 格式，不嘗試轉換為 Parquet（避免記憶體溢出）
-        logger.info("由於記憶體限制，跳過 Parquet 格式轉換，僅使用 CSV 格式儲存")
-        feature_path = os.path.join(self.preprocessed_path, 'features.csv')
-        target_path = os.path.join(self.preprocessed_path, 'target.csv')
-        
-        # 為了與現有程式碼相容，創建符號連結
-        feature_parquet_path = os.path.join(self.preprocessed_path, 'features.parquet.unavailable')
-        target_parquet_path = os.path.join(self.preprocessed_path, 'target.parquet.unavailable')
-        
-        # 創建標記文件，表示 Parquet 格式不可用
-        with open(feature_parquet_path, 'w') as f:
-            f.write("Parquet format unavailable due to memory constraints. Use CSV format instead.")
-            
-        with open(target_parquet_path, 'w') as f:
-            f.write("Parquet format unavailable due to memory constraints. Use CSV format instead.")
-            
-        logger.info(f"已創建標記文件，標示 Parquet 格式不可用: {feature_parquet_path}")
+        # 嘗試使用 Polars 進行高效率 Parquet 轉換（低記憶體方式）
+        try:
+            # 檢查 Polars 是否可用
+            if POLARS_AVAILABLE:
+                logger.info("使用 Polars 進行低記憶體 Parquet 轉換...")
+                feature_path = os.path.join(self.preprocessed_path, 'features.parquet')
+                target_path = os.path.join(self.preprocessed_path, 'target.parquet')
+                
+                # 使用 Polars 分批讀取 CSV 並保存為 Parquet
+                logger.info(f"使用 Polars 從 CSV 轉換為 Parquet: {feature_csv_path} -> {feature_path}")
+                
+                # 分批處理以減少記憶體使用
+                batch_size = 100000  # 每批處理的行數
+                
+                # 首先嘗試獲取總行數
+                try:
+                    # 使用 wc -l 快速計算行數
+                    import subprocess
+                    result = subprocess.run(['wc', '-l', feature_csv_path], capture_output=True, text=True)
+                    total_rows = int(result.stdout.split()[0]) - 1  # 減去標題行
+                    logger.info(f"CSV 文件總行數: {total_rows}")
+                except Exception as e:
+                    logger.warning(f"無法獲取行數: {str(e)}，將使用預設批次大小")
+                    total_rows = None
+                
+                # 使用 Polars 進行分批處理
+                if total_rows:
+                    # 計算批次數
+                    num_batches = (total_rows + batch_size - 1) // batch_size
+                    logger.info(f"將分 {num_batches} 批次進行 Parquet 轉換")
+                    
+                    # 獲取 CSV 標題
+                    df_schema = pl.read_csv(feature_csv_path, n_rows=1)
+                    columns = df_schema.columns
+                    
+                    # 初始化空的 Parquet 檔案
+                    first_batch = pl.read_csv(feature_csv_path, n_rows=1)
+                    first_batch.write_parquet(feature_path)
+                    
+                    # 分批讀取並追加
+                    for i in range(num_batches):
+                        offset = i * batch_size + 1  # 加1跳過標題
+                        # 使用「掃描」模式，而不是一次性載入整個資料
+                        batch_df = pl.scan_csv(
+                            feature_csv_path, 
+                            skip_rows=offset,
+                            n_rows=batch_size,
+                            has_header=False,
+                            new_columns=columns
+                        ).collect()
+                        
+                        # 追加到 Parquet 文件
+                        if i == 0:
+                            batch_df.write_parquet(feature_path)
+                        else:
+                            batch_df.write_parquet(feature_path, mode="append")
+                            
+                        logger.info(f"已處理批次 {i+1}/{num_batches}")
+                        
+                        # 強制釋放記憶體
+                        del batch_df
+                        gc.collect()
+                        print_memory_usage()
+                else:
+                    # 如果無法獲取行數，使用最保守的方法
+                    logger.info("使用 Polars LazyFrame 掃描 CSV 並轉換為 Parquet")
+                    pl.scan_csv(feature_csv_path).collect().write_parquet(feature_path)
+                
+                # 處理目標變數 (通常比較小)
+                logger.info(f"處理目標變數: {target_csv_path} -> {target_path}")
+                pl.read_csv(target_csv_path).write_parquet(target_path)
+                
+                logger.info(f"Polars 成功將資料轉換為 Parquet 格式: {feature_path}")
+                
+            else:
+                # Polars 不可用，使用 CSV 格式
+                logger.warning("Polars 不可用，僅使用 CSV 格式儲存")
+                feature_path = os.path.join(self.preprocessed_path, 'features.csv')
+                target_path = os.path.join(self.preprocessed_path, 'target.csv')
+                
+                # 創建標記文件，表示 Parquet 格式不可用
+                feature_parquet_path = os.path.join(self.preprocessed_path, 'features.parquet.unavailable')
+                target_parquet_path = os.path.join(self.preprocessed_path, 'target.parquet.unavailable')
+                
+                with open(feature_parquet_path, 'w') as f:
+                    f.write("Parquet format unavailable because Polars is not installed. Use CSV format instead.")
+                    
+                with open(target_parquet_path, 'w') as f:
+                    f.write("Parquet format unavailable because Polars is not installed. Use CSV format instead.")
+                    
+                logger.info(f"已創建標記文件，標示 Parquet 格式不可用: {feature_parquet_path}")
+        except Exception as e:
+            logger.warning(f"使用 Polars 保存 Parquet 格式失敗: {str(e)}，僅使用 CSV 格式")
+            feature_path = os.path.join(self.preprocessed_path, 'features.csv')
+            target_path = os.path.join(self.preprocessed_path, 'target.csv')
         
         # 保存編碼器和縮放器
         with open(os.path.join(self.preprocessed_path, 'scaler.pkl'), 'wb') as f:
