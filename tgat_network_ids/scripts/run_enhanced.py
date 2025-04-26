@@ -116,8 +116,9 @@ def setup_output_dirs(config):
     
     return model_dir, results_dir, vis_dir, output_dir
 
-@track_memory_usage
-def main():
+# @track_memory_usage
+def main():    with track_memory_usage('主函數執行'):
+
     """主函數"""
     # 解析命令行參數
     args = parse_args()
@@ -427,7 +428,8 @@ def main():
         logger.info("========================")
         
         # 返回主要結果
-        return {
+                results = {
+        return results
             'model_path': model_path,
             'results_path': results_path,
             'accuracy': evaluation_results.get('accuracy', 0),
