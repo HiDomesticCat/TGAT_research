@@ -71,7 +71,7 @@ def parse_args():
     # Enhancement-related parameters
     parser.add_argument('--use_adaptive_window', action='store_true',
                         help='Use adaptive time window')
-    parser.add_argument('--adaptive_window_config', type=str, 
+    parser.add_argument('--adaptive_window_config', type=str, default=None,
                         help='Adaptive window configuration file path')
 
     parser.add_argument('--use_advanced_sampling', action='store_true', 
@@ -95,7 +95,7 @@ def parse_args():
                         help='Generate visualization charts')
     parser.add_argument('--save_model', action='store_true', default=True,
                         help='Save model checkpoints')
-    parser.add_argument('--output_dir', type=str,
+    parser.add_argument('--output_dir', type=str, default=None,
                         help='Output directory, default uses configuration settings')
 
     # Advanced optimization parameters
@@ -113,7 +113,23 @@ def parse_args():
 
 def load_config(config_path):
     """Load configuration file"""
-    with open(config_path, 'r') as f:
+    # Allow both absolute and relative paths
+    if not os.path.isabs(config_path):
+        # Try direct relative path
+        if os.path.exists(config_path):
+            path = config_path
+        # Try relative to script directory
+        elif os.path.exists(os.path.join(os.path.dirname(__file__), config_path)):
+            path = os.path.join(os.path.dirname(__file__), config_path)
+        # Try relative to project root
+        elif os.path.exists(os.path.join(project_root, config_path)):
+            path = os.path.join(project_root, config_path)
+        else:
+            raise FileNotFoundError(f"Configuration file not found: {config_path}")
+    else:
+        path = config_path
+        
+    with open(path, 'r') as f:
         config = yaml.safe_load(f)
     return config
 
@@ -144,6 +160,18 @@ def main():
 
     # Load configuration
     config = load_config(args.config)
+
+    # Create data config dictionary for the data loader
+    data_config = {
+        'data': {
+            'path': args.data_path if args.data_path else config['data']['path'],
+            'test_size': config['data'].get('test_size', 0.2),
+            'min_samples_per_class': config['data'].get('min_samples_per_class', 1000),
+            # Add other necessary data configuration options
+            'batch_size': config['training'].get('batch_size', 64),
+            'memory_optimization': True
+        }
+    }
 
     # Command line arguments override configuration file
     if args.data_path:
@@ -182,11 +210,7 @@ def main():
     with track_memory_usage('Main function execution'):
         # Load data
         logger.info("Starting data loading...")
-        data_loader = EnhancedMemoryOptimizedDataLoader(
-            config['data']['path'],
-            use_memory=args.use_memory,
-            memory_size=args.memory_size
-        )
+        data_loader = EnhancedMemoryOptimizedDataLoader(data_config)
         
         # Build graph
         logger.info("Starting graph building...")
