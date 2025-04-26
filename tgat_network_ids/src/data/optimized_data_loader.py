@@ -422,251 +422,252 @@ class EnhancedMemoryOptimizedDataLoader:
         return features_exist and target_exist
         
     def _save_preprocessed_data(self):
-        """保存預處理後的資料，使用多檔案分片儲存策略避免單一大型檔案"""
-        # 確保目錄存在
-        if not os.path.exists(self.preprocessed_path):
-            os.makedirs(self.preprocessed_path)
-            
-        # 建立分片目錄
-        features_dir = os.path.join(self.preprocessed_path, 'features_chunks')
-        if not os.path.exists(features_dir):
+        """保存預處理後的資料，使用原子操作和狀態追蹤確保一致性"""
+        import json
+        import tempfile
+        import shutil
+        import h5py
+        
+        # 設置臨時處理目錄
+        temp_dir = tempfile.mkdtemp(prefix="tgat_preprocessing_")
+        logger.info(f"使用臨時目錄進行原子儲存: {temp_dir}")
+        
+        try:
+            # 建立最終目標目錄 (如果不存在)
+            if not os.path.exists(self.preprocessed_path):
+                os.makedirs(self.preprocessed_path)
+                
+            # 建立分片目錄
+            features_dir = os.path.join(temp_dir, 'features_chunks')
             os.makedirs(features_dir)
             
-        # 創建一個淺拷貝用於保存，避免修改原始資料
-        logger.info("準備保存預處理資料 (使用分片儲存策略)...")
-        
-        # 創建檢查點檔案路徑與其他必要的檔案
-        checkpoint_path = os.path.join(self.preprocessed_path, 'checkpoint.json')
-        target_csv_path = os.path.join(self.preprocessed_path, 'target.csv')
-        metadata_path = os.path.join(self.preprocessed_path, 'features_metadata.json')
-        
-        # 檢查是否已存在處理檢查點
-        current_chunk = 0
-        if os.path.exists(checkpoint_path):
-            try:
-                import json
-                with open(checkpoint_path, 'r') as f:
-                    checkpoint_data = json.load(f)
-                    current_chunk = checkpoint_data.get('current_chunk', 0)
-                    logger.info(f"發現處理檢查點，將從分塊 {current_chunk} 繼續處理")
-            except Exception as e:
-                logger.warning(f"讀取檢查點文件失敗: {str(e)}，將從頭開始處理")
-                current_chunk = 0
-        
-        # 分塊保存策略，避免記憶體溢出
-        chunk_size = 500000  # 減小每個分塊的行數，避免後續讀取時的記憶體問題
-        total_rows = len(self.features)
-        chunks = list(range(0, total_rows, chunk_size)) + [total_rows]
-        total_chunks = len(chunks) - 1
-        logger.info(f"將分 {total_chunks} 批次保存 {total_rows} 筆資料，從第 {current_chunk} 批次開始")
-        
-        # 特別處理IP地址和其他大量唯一值的欄位
-        ip_cols = [col for col in self.features.columns if 'IP' in col or 'HTTP' in col or 'Simillar' in col]
-        if ip_cols:
-            logger.info(f"檢測到可能包含大量唯一值的欄位: {ip_cols}")
-        
-        # 儲存列名和資料類型資訊，以便後續載入重建
-        if current_chunk == 0:
-            # 儲存特徵元數據
-            columns = list(self.features.columns)
-            dtypes = {col: str(self.features[col].dtype) for col in columns}
+            # 創建一個淺拷貝用於保存，避免修改原始資料
+            logger.info("準備保存預處理資料 (使用分片儲存策略)...")
             
-            # 記錄重要的中繼資料
-            metadata = {
-                'columns': columns,
-                'dtypes': dtypes,
-                'total_rows': total_rows,
-                'chunk_size': chunk_size,
+            # 創建檢查點檔案路徑與其他必要的檔案
+            checkpoint_path = os.path.join(temp_dir, 'checkpoint.json')
+            manifest_path = os.path.join(temp_dir, 'manifest.json')
+            preprocessing_state_path = os.path.join(temp_dir, 'preprocessing_state.h5')
+            
+            # 檢查是否已存在處理檢查點
+            current_chunk = 0
+            if os.path.exists(os.path.join(self.preprocessed_path, 'manifest.json')):
+                try:
+                    with open(os.path.join(self.preprocessed_path, 'manifest.json'), 'r') as f:
+                        existing_manifest = json.load(f)
+                        if existing_manifest.get('status') == 'processing':
+                            current_chunk = existing_manifest.get('current_chunk', 0)
+                            logger.info(f"發現未完成的處理，將從分塊 {current_chunk} 繼續")
+                except Exception as e:
+                    logger.warning(f"讀取現有manifest文件失敗: {str(e)}，將從頭開始處理")
+                    current_chunk = 0
+            
+            # 分塊保存策略，避免記憶體溢出
+            chunk_size = 500000  # 減小每個分塊的行數，避免後續讀取時的記憶體問題
+            total_rows = len(self.features)
+            chunks = list(range(0, total_rows, chunk_size)) + [total_rows]
+            total_chunks = len(chunks) - 1
+            logger.info(f"將分 {total_chunks} 批次保存 {total_rows} 筆資料，從第 {current_chunk} 批次開始")
+            
+            # 特別處理IP地址和其他大量唯一值的欄位
+            ip_cols = [col for col in self.features.columns if 'IP' in col or 'HTTP' in col or 'Simillar' in col]
+            if ip_cols:
+                logger.info(f"檢測到可能包含大量唯一值的欄位: {ip_cols}")
+            
+            # 先儲存小型資料 (目標變數、縮放器、編碼器) 到 HDF5 容器
+            logger.info(f"儲存預處理狀態到統一的 HDF5 容器: {preprocessing_state_path}")
+            with h5py.File(preprocessing_state_path, 'w') as f:
+                # 儲存基本元數據
+                metadata_group = f.create_group('metadata')
+                metadata_group.attrs['timestamp'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S") 
+                metadata_group.attrs['total_rows'] = total_rows
+                metadata_group.attrs['chunk_size'] = chunk_size
+                metadata_group.attrs['total_chunks'] = total_chunks
+                
+                # 儲存特徵欄位資訊
+                columns = list(self.features.columns)
+                dtypes = {col: str(self.features[col].dtype) for col in columns}
+                column_group = metadata_group.create_group('columns')
+                for i, col in enumerate(columns):
+                    column_group.attrs[f'col_{i}'] = col
+                dtype_group = metadata_group.create_group('dtypes')
+                for col, dtype in dtypes.items():
+                    dtype_group.attrs[col] = dtype
+                
+                # 儲存高基數列資訊
+                high_card_group = metadata_group.create_group('high_cardinality')
+                for i, col in enumerate(ip_cols):
+                    high_card_group.attrs[f'col_{i}'] = col
+                
+                # 儲存目標變數 (通常體積較小)
+                target_dataset = f.create_dataset('target', data=self.target.values)
+                
+                # 儲存 scaler 和 encoder 的簡化參數 (只儲存關鍵屬性)
+                scaler_group = f.create_group('scaler')
+                if hasattr(self.scaler, 'mean_'):
+                    scaler_group.create_dataset('mean', data=self.scaler.mean_)
+                if hasattr(self.scaler, 'scale_'):
+                    scaler_group.create_dataset('scale', data=self.scaler.scale_)
+                if hasattr(self.scaler, 'var_'):
+                    scaler_group.create_dataset('var', data=self.scaler.var_)
+                    
+                encoder_group = f.create_group('encoder')
+                if hasattr(self.label_encoder, 'classes_'):
+                    # 儲存類別標籤
+                    classes = self.label_encoder.classes_
+                    encoder_group.create_dataset('classes', data=np.array([str(c) for c in classes], dtype='S'))
+                    
+            # 同時儲存傳統的 pickle 格式預處理工具作為備份
+            with open(os.path.join(temp_dir, 'scaler.pkl'), 'wb') as f:
+                pickle.dump(self.scaler, f)
+                
+            with open(os.path.join(temp_dir, 'label_encoder.pkl'), 'wb') as f:
+                pickle.dump(self.label_encoder, f)
+                
+            # 創建處理清單，追蹤所有文件
+            manifest = {
+                'version': '1.0',
+                'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                'status': 'processing',
                 'total_chunks': total_chunks,
-                'high_cardinality_columns': ip_cols,
-                'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                'current_chunk': current_chunk,
+                'files': {
+                    'state': os.path.basename(preprocessing_state_path),
+                    'scaler': 'scaler.pkl',
+                    'encoder': 'label_encoder.pkl',
+                    'chunks': []
+                }
             }
             
-            # 儲存元數據
-            with open(metadata_path, 'w') as f:
-                json.dump(metadata, f, indent=2)
+            # 開始分塊保存特徵資料 - 每個分塊儲存為獨立檔案
+            for i in range(current_chunk, total_chunks):
+                start_idx = chunks[i]
+                end_idx = chunks[i+1]
                 
-            logger.info(f"已儲存特徵元數據: {metadata_path}")
-            
-            # 保存目標變數 (通常體積較小，可一次處理)
-            pd.DataFrame({'target': self.target}).to_csv(target_csv_path, index=False)
-            logger.info(f"目標資料已保存至CSV: {target_csv_path}")
-        
-        # 分塊保存特徵資料 - 每個分塊儲存為獨立檔案
-        import json
-        for i in range(current_chunk, total_chunks):
-            start_idx = chunks[i]
-            end_idx = chunks[i+1]
-            
-            try:
-                # 定義此分塊的檔案路徑
-                chunk_path = os.path.join(features_dir, f'chunk_{i:05d}.parquet')
-                
-                # 檢查是否已存在此分塊檔案（支援續傳）
-                if os.path.exists(chunk_path):
-                    logger.info(f"分塊檔案已存在，跳過：{chunk_path}")
-                    continue
-                
-                # 取出當前分塊
-                chunk = self.features.iloc[start_idx:end_idx].copy()
-                
-                # 針對類別列的特殊處理，避免記憶體暴增
-                for col in chunk.select_dtypes(include=['category']).columns:
-                    if col in ip_cols:
-                        # 對於 IP 地址或大量唯一值的列，使用較節省記憶體的方法
-                        logger.info(f"使用記憶體優化方法處理大量唯一值欄位: '{col}'")
-                        # 維持原始編碼，不轉字串
-                        pass
-                    else:
-                        # 其他類別列可以安全地轉換為字串
-                        try:
-                            chunk[col] = chunk[col].astype(str)
-                        except Exception as e:
-                            logger.warning(f"轉換列 '{col}' 失敗: {str(e)}，保持原狀")
-                
-                # 儲存為獨立的 Parquet 檔案
-                if POLARS_AVAILABLE:
-                    # 使用 Polars 高效保存 Parquet (更節省記憶體)
-                    pl.from_pandas(chunk).write_parquet(chunk_path)
-                else:
-                    # 回退到 Pandas
-                    chunk.to_parquet(chunk_path, index=False)
-                    
-                logger.info(f"已保存分塊 {i+1}/{total_chunks} 至獨立檔案: {chunk_path}")
-                
-                # 更新檢查點
-                with open(checkpoint_path, 'w') as f:
-                    json.dump({
-                        'current_chunk': i + 1,
-                        'total_chunks': total_chunks,
-                        'last_processed_row': end_idx,
-                        'total_rows': total_rows,
-                        'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    }, f)
-                    
-                logger.info(f"已更新檢查點: 批次 {i+1}/{total_chunks}")
-                
-                # 強制釋放記憶體
-                del chunk
-                gc.collect()
-                print_memory_usage()
-                
-            except Exception as e:
-                logger.error(f"處理分塊 {i+1} 時發生錯誤: {str(e)}")
-                logger.info(f"已保存檢查點，可在程式重啟後從批次 {i} 繼續處理")
-                raise  # 重新引發異常，讓上層捕獲
-        
-        logger.info(f"特徵資料已全部保存為分片檔案: {features_dir}")
-        
-        # 嘗試使用 Polars 進行高效率 Parquet 轉換（低記憶體方式）
-        try:
-            # 檢查 Polars 是否可用
-            if POLARS_AVAILABLE:
-                logger.info("使用 Polars 進行低記憶體 Parquet 轉換...")
-                feature_path = os.path.join(self.preprocessed_path, 'features.parquet')
-                target_path = os.path.join(self.preprocessed_path, 'target.parquet')
-                
-                # 使用 Polars 分批讀取 CSV 並保存為 Parquet
-                logger.info(f"使用 Polars 從 CSV 轉換為 Parquet: {feature_csv_path} -> {feature_path}")
-                
-                # 分批處理以減少記憶體使用
-                batch_size = 100000  # 每批處理的行數
-                
-                # 首先嘗試獲取總行數
                 try:
-                    # 使用 wc -l 快速計算行數
-                    import subprocess
-                    result = subprocess.run(['wc', '-l', feature_csv_path], capture_output=True, text=True)
-                    total_rows = int(result.stdout.split()[0]) - 1  # 減去標題行
-                    logger.info(f"CSV 文件總行數: {total_rows}")
-                except Exception as e:
-                    logger.warning(f"無法獲取行數: {str(e)}，將使用預設批次大小")
-                    total_rows = None
-                
-                # 使用 Polars 進行分批處理
-                if total_rows:
-                    # 計算批次數
-                    num_batches = (total_rows + batch_size - 1) // batch_size
-                    logger.info(f"將分 {num_batches} 批次進行 Parquet 轉換")
+                    # 定義此分塊的檔案路徑
+                    chunk_filename = f'chunk_{i:05d}.parquet'
+                    chunk_path = os.path.join(features_dir, chunk_filename)
                     
-                    # 獲取 CSV 標題
-                    df_schema = pl.read_csv(feature_csv_path, n_rows=1)
-                    columns = df_schema.columns
+                    # 取出當前分塊
+                    chunk = self.features.iloc[start_idx:end_idx].copy()
                     
-                    # 初始化空的 Parquet 檔案
-                    first_batch = pl.read_csv(feature_csv_path, n_rows=1)
-                    first_batch.write_parquet(feature_path)
-                    
-                    # 分批讀取並追加
-                    for i in range(num_batches):
-                        offset = i * batch_size + 1  # 加1跳過標題
-                        # 使用「掃描」模式，而不是一次性載入整個資料
-                        batch_df = pl.scan_csv(
-                            feature_csv_path, 
-                            skip_rows=offset,
-                            n_rows=batch_size,
-                            has_header=False,
-                            new_columns=columns
-                        ).collect()
-                        
-                        # 追加到 Parquet 文件
-                        if i == 0:
-                            batch_df.write_parquet(feature_path)
+                    # 針對類別列的特殊處理，避免記憶體暴增
+                    for col in chunk.select_dtypes(include=['category']).columns:
+                        if col in ip_cols:
+                            # 對於 IP 地址或大量唯一值的列，使用較節省記憶體的方法
+                            logger.info(f"使用記憶體優化方法處理大量唯一值欄位: '{col}'")
+                            # 維持原始編碼，不轉字串
+                            pass
                         else:
-                            batch_df.write_parquet(feature_path, mode="append")
-                            
-                        logger.info(f"已處理批次 {i+1}/{num_batches}")
+                            # 其他類別列可以安全地轉換為字串
+                            try:
+                                chunk[col] = chunk[col].astype(str)
+                            except Exception as e:
+                                logger.warning(f"轉換列 '{col}' 失敗: {str(e)}，保持原狀")
+                    
+                    # 儲存為獨立的 Parquet 檔案
+                    if POLARS_AVAILABLE:
+                        # 使用 Polars 高效保存 Parquet (更節省記憶體)
+                        pl.from_pandas(chunk).write_parquet(chunk_path)
+                    else:
+                        # 回退到 Pandas
+                        chunk.to_parquet(chunk_path, index=False)
                         
-                        # 強制釋放記憶體
-                        del batch_df
-                        gc.collect()
-                        print_memory_usage()
-                else:
-                    # 如果無法獲取行數，使用最保守的方法
-                    logger.info("使用 Polars LazyFrame 掃描 CSV 並轉換為 Parquet")
-                    pl.scan_csv(feature_csv_path).collect().write_parquet(feature_path)
-                
-                # 處理目標變數 (通常比較小)
-                logger.info(f"處理目標變數: {target_csv_path} -> {target_path}")
-                pl.read_csv(target_csv_path).write_parquet(target_path)
-                
-                logger.info(f"Polars 成功將資料轉換為 Parquet 格式: {feature_path}")
-                
-            else:
-                # Polars 不可用，使用 CSV 格式
-                logger.warning("Polars 不可用，僅使用 CSV 格式儲存")
-                feature_path = os.path.join(self.preprocessed_path, 'features.csv')
-                target_path = os.path.join(self.preprocessed_path, 'target.csv')
-                
-                # 創建標記文件，表示 Parquet 格式不可用
-                feature_parquet_path = os.path.join(self.preprocessed_path, 'features.parquet.unavailable')
-                target_parquet_path = os.path.join(self.preprocessed_path, 'target.parquet.unavailable')
-                
-                with open(feature_parquet_path, 'w') as f:
-                    f.write("Parquet format unavailable because Polars is not installed. Use CSV format instead.")
+                    logger.info(f"已保存分塊 {i+1}/{total_chunks} 至獨立檔案: {chunk_path}")
                     
-                with open(target_parquet_path, 'w') as f:
-                    f.write("Parquet format unavailable because Polars is not installed. Use CSV format instead.")
+                    # 將此分塊添加到manifest
+                    manifest['files']['chunks'].append(f'features_chunks/{chunk_filename}')
+                    manifest['current_chunk'] = i + 1
                     
-                logger.info(f"已創建標記文件，標示 Parquet 格式不可用: {feature_parquet_path}")
+                    # 更新清單
+                    with open(manifest_path, 'w') as f:
+                        json.dump(manifest, f, indent=2)
+                    
+                    # 更新檢查點
+                    with open(checkpoint_path, 'w') as f:
+                        json.dump({
+                            'current_chunk': i + 1,
+                            'total_chunks': total_chunks,
+                            'last_processed_row': end_idx,
+                            'total_rows': total_rows,
+                            'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        }, f)
+                        
+                    logger.info(f"已更新檢查點: 批次 {i+1}/{total_chunks}")
+                    
+                    # 強制釋放記憶體
+                    del chunk
+                    gc.collect()
+                    print_memory_usage()
+                    
+                except Exception as e:
+                    logger.error(f"處理分塊 {i+1} 時發生錯誤: {str(e)}")
+                    
+                    # 仍然更新清單，但標記處理狀態
+                    manifest['status'] = 'incomplete'
+                    with open(manifest_path, 'w') as f:
+                        json.dump(manifest, f, indent=2)
+                        
+                    # 複製已完成的工作到目標目錄，以便後續恢復
+                    try:
+                        target_manifest_path = os.path.join(self.preprocessed_path, 'manifest.json')
+                        shutil.copy2(manifest_path, target_manifest_path)
+                        logger.info(f"保存中間狀態清單到: {target_manifest_path}")
+                    except Exception as copy_err:
+                        logger.warning(f"複製清單文件失敗: {str(copy_err)}")
+                        
+                    raise  # 重新引發異常
+            
+            # 全部處理完成，更新狀態
+            manifest['status'] = 'complete'
+            with open(manifest_path, 'w') as f:
+                json.dump(manifest, f, indent=2)
+                
+            # 現在一次性將所有文件移動到目標目錄 (原子操作)
+            logger.info(f"所有處理完成，執行原子的目錄切換操作")
+            
+            # 先備份舊目錄 (如果存在)
+            if os.path.exists(self.preprocessed_path):
+                backup_dir = f"{self.preprocessed_path}_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                logger.info(f"備份現有處理目錄: {self.preprocessed_path} -> {backup_dir}")
+                try:
+                    # 將現有目錄移動為備份
+                    shutil.move(self.preprocessed_path, backup_dir)
+                except Exception as e:
+                    # 如果無法移動，則跳過，將直接覆蓋
+                    logger.warning(f"備份現有目錄失敗: {str(e)}，將直接覆蓋")
+                    
+            # 創建新的目標目錄
+            os.makedirs(self.preprocessed_path, exist_ok=True)
+            
+            # 一次性複製所有文件
+            for root, dirs, files in os.walk(temp_dir):
+                for file in files:
+                    src_path = os.path.join(root, file)
+                    # 計算相對路徑
+                    rel_path = os.path.relpath(src_path, temp_dir)
+                    dst_path = os.path.join(self.preprocessed_path, rel_path)
+                    
+                    # 確保目標目錄存在
+                    os.makedirs(os.path.dirname(dst_path), exist_ok=True)
+                    
+                    # 複製文件
+                    shutil.copy2(src_path, dst_path)
+                    
+            logger.info(f"預處理資料已全部保存至: {self.preprocessed_path}")
+            logger.info("保存過程已完成，使用原子操作確保一致性")
+                
         except Exception as e:
-            logger.warning(f"使用 Polars 保存 Parquet 格式失敗: {str(e)}，僅使用 CSV 格式")
-            feature_path = os.path.join(self.preprocessed_path, 'features.csv')
-            target_path = os.path.join(self.preprocessed_path, 'target.csv')
-        
-        # 保存編碼器和縮放器
-        with open(os.path.join(self.preprocessed_path, 'scaler.pkl'), 'wb') as f:
-            pickle.dump(self.scaler, f)
-            
-        with open(os.path.join(self.preprocessed_path, 'label_encoder.pkl'), 'wb') as f:
-            pickle.dump(self.label_encoder, f)
-        
-        # 全部完成後，移除檢查點檔案
-        if os.path.exists(checkpoint_path):
-            os.remove(checkpoint_path)
-            
-        logger.info(f"預處理資料已全部保存至: {self.preprocessed_path}")
-        logger.info("保存過程已完成，檢查點已清理")
+            logger.error(f"保存預處理資料時發生錯誤: {str(e)}")
+            raise
+        finally:
+            # 清理臨時目錄
+            try:
+                shutil.rmtree(temp_dir)
+                logger.info(f"已清理臨時目錄: {temp_dir}")
+            except Exception as e:
+                logger.warning(f"清理臨時目錄失敗: {str(e)}")
         
     def _load_preprocessed_data(self):
         """載入預處理後的資料，支援分片文件和嘗試恢復任何缺少的預處理工具"""
