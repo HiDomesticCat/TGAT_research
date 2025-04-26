@@ -162,6 +162,109 @@ class EnhancedMemoryOptimizedDataLoader:
 
         return self.df
 
+    def _process_ip_addresses(self, df):
+        """處理IP地址列，保留子網關係和結構信息"""
+        import ipaddress
+        import socket
+        
+        # 檢測可能的IP地址列
+        ip_columns = [col for col in df.columns if 'IP' in col or 'ip' in col.lower()]
+        if not ip_columns:
+            logger.info("未檢測到IP地址列")
+            return df
+            
+        logger.info(f"檢測到 {len(ip_columns)} 個可能的IP地址列: {ip_columns}")
+        df_processed = df.copy()
+        
+        for col in ip_columns:
+            try:
+                # 檢查是否真的是IP地址列
+                sample_values = df[col].dropna().head(100).astype(str)
+                
+                # 檢測樣本中是否有有效的IP地址
+                valid_ip_count = 0
+                for val in sample_values:
+                    try:
+                        # 嘗試解析IPv4/IPv6地址
+                        ipaddress.ip_address(val.strip())
+                        valid_ip_count += 1
+                    except:
+                        pass
+                        
+                # 如果超過50%的樣本是有效IP地址，則處理此列
+                if valid_ip_count / len(sample_values) > 0.5:
+                    logger.info(f"確認 '{col}' 為IP地址列，開始提取特徵")
+                    
+                    # 創建新的特徵列
+                    octet_cols = []
+                    subnet_cols = []
+                    df_processed[f"{col}_is_private"] = False
+                    df_processed[f"{col}_is_global"] = False
+                    
+                    # 提取IP地址的各部分
+                    for i in range(1, 5):
+                        octet_col = f"{col}_octet{i}"
+                        df_processed[octet_col] = pd.NA
+                        octet_cols.append(octet_col)
+                        
+                    # 提取子網信息
+                    for mask in [8, 16, 24]:
+                        subnet_col = f"{col}_subnet{mask}"
+                        df_processed[subnet_col] = pd.NA
+                        subnet_cols.append(subnet_col)
+                        
+                    # 逐行處理IP地址
+                    for idx, ip_str in enumerate(tqdm(df[col].astype(str), desc=f"處理 {col}")):
+                        try:
+                            # 處理IPv4地址
+                            ip_str = ip_str.strip()
+                            ip = ipaddress.ip_address(ip_str)
+                            
+                            # 記錄IP類型
+                            df_processed.at[idx, f"{col}_is_private"] = ip.is_private
+                            df_processed.at[idx, f"{col}_is_global"] = ip.is_global
+                            
+                            if isinstance(ip, ipaddress.IPv4Address):
+                                # 分解IP地址八位組
+                                octets = ip_str.split('.')
+                                for i, octet in enumerate(octets, 1):
+                                    df_processed.at[idx, f"{col}_octet{i}"] = int(octet)
+                                    
+                                # 計算不同掩碼的子網
+                                for mask in [8, 16, 24]:
+                                    subnet = ipaddress.IPv4Network(f"{ip_str}/{mask}", strict=False)
+                                    df_processed.at[idx, f"{col}_subnet{mask}"] = str(subnet)
+                        except Exception as e:
+                            # 跳過無效的IP地址
+                            pass
+                            
+                    # 將提取的特徵轉換為適當的類型
+                    for octet_col in octet_cols:
+                        # 八位組為整數
+                        df_processed[octet_col] = pd.to_numeric(df_processed[octet_col], errors='coerce')
+                        df_processed[octet_col].fillna(-1, inplace=True)
+                        df_processed[octet_col] = df_processed[octet_col].astype('int16')
+                        
+                    for subnet_col in subnet_cols:
+                        # 子網信息為類別
+                        df_processed[subnet_col].fillna("unknown", inplace=True)
+                        df_processed[subnet_col] = df_processed[subnet_col].astype('category')
+                        
+                    # 布爾特徵轉換為整數
+                    df_processed[f"{col}_is_private"] = df_processed[f"{col}_is_private"].astype('int8')
+                    df_processed[f"{col}_is_global"] = df_processed[f"{col}_is_global"].astype('int8')
+                    
+                    # 原始IP地址列轉換為類別型
+                    df_processed[col] = df_processed[col].astype('category')
+                    
+                    logger.info(f"IP地址列 '{col}' 處理完成，生成 {len(octet_cols) + len(subnet_cols) + 2} 個新特徵")
+                else:
+                    logger.info(f"列 '{col}' 經檢測不是IP地址列，跳過處理")
+            except Exception as e:
+                logger.warning(f"處理IP地址列 '{col}' 時出錯: {str(e)}，跳過此列")
+                
+        return df_processed
+    
     def preprocess(self):
         """預處理資料 - 對數值和分類特徵進行標準化和編碼"""
         logger.info("開始預處理資料...")
@@ -191,6 +294,10 @@ class EnhancedMemoryOptimizedDataLoader:
         # 提取特徵和目標
         self.target = self.df[target_col]
         self.features = self.df.drop(columns=[target_col])
+        
+        # 處理IP地址：提取IP地址結構特徵
+        logger.info("預處理IP地址列，保留網絡拓撲信息...")
+        self.features = self._process_ip_addresses(self.features)
         
         # 儲存特徵名稱
         self.feature_names = list(self.features.columns)
