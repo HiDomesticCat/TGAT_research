@@ -595,7 +595,7 @@ class OptimizedGraphBuilder:
         filtered_timestamps = [timestamps[i] for i in valid_indices]
 
         if edge_feats is not None:
-            filtered_edge_feats = [edge_feats[i] for i in valid_indices] for i in valid_indices]
+            filtered_edge_feats = [edge_feats[i] for i in valid_indices]
         else:
             filtered_edge_feats = None
 
