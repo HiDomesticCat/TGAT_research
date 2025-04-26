@@ -27,7 +27,7 @@ import scipy.sparse as sp
 # 導入記憶體優化工具
 from ..utils.memory_utils import clean_memory
 
-logging.basicConfig(level=logging.INFO,,
+logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
