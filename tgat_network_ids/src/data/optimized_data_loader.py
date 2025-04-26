@@ -201,48 +201,153 @@ class EnhancedMemoryOptimizedDataLoader:
             # 創建副本以避免 SettingWithCopyWarning
             self.features = self.features.copy()
             
-            # 檢測並處理無限值和極端值
+            # 檢測並處理無限值和極端值 - 使用多種策略
             num_features_cleaned = num_features.copy()
             
-            # 替換無限值和NaN為該列的中位數
+            # 儲存無效值處理的詳細信息，以便後續分析
+            invalid_value_stats = {}
+            
+            # 替換無限值和NaN - 使用進階策略
             for col in num_features_cleaned.columns:
                 # 獲取有限值的掩碼
                 mask_inf = np.isinf(num_features_cleaned[col])
                 mask_nan = np.isnan(num_features_cleaned[col])
                 mask_large = np.abs(num_features_cleaned[col]) > 1e30  # 過大的值
                 
-                if mask_inf.any() or mask_nan.any() or mask_large.any():
-                    # 組合所有問題值的掩碼
-                    mask_invalid = mask_inf | mask_nan | mask_large
+                # 組合所有問題值的掩碼
+                mask_invalid = mask_inf | mask_nan | mask_large
+                invalid_count = mask_invalid.sum()
+                
+                if invalid_count > 0:
+                    # 記錄無效值統計
+                    invalid_value_stats[col] = {
+                        'total': invalid_count,
+                        'percentage': invalid_count / len(num_features_cleaned) * 100,
+                        'inf_count': mask_inf.sum(),
+                        'nan_count': mask_nan.sum(),
+                        'large_count': mask_large.sum()
+                    }
                     
-                    # 計算有效值的中位數
+                    # 計算有效值的中位數和平均值
                     valid_values = num_features_cleaned.loc[~mask_invalid, col]
-                    if len(valid_values) > 0:
-                        median_value = valid_values.median()
+                    
+                    # 檢查無效值比例
+                    invalid_ratio = invalid_count / len(num_features_cleaned)
+                    
+                    if invalid_ratio > 0.5:
+                        # 超過50%的資料是無效值 - 這可能是一個問題列
+                        logger.error(f"警告：列 '{col}' 中有 {invalid_ratio:.2%} 的值為無效值，可能指示資料品質問題")
+                        
+                        # 根據無效值的類型選擇處理策略
+                        if mask_nan.sum() / invalid_count > 0.8:
+                            # 主要是 NaN，可能是有意義的缺失值
+                            logger.info(f"列 '{col}' 主要是NaN值，考慮可能是有意義的缺失")
+                            # 使用專門的特徵值表示缺失
+                            if len(valid_values) > 0:
+                                fill_value = -999  # 特殊標記值
+                            else:
+                                fill_value = 0
+                        else:
+                            # 主要是其他類型的無效值，可能是資料錯誤
+                            if len(valid_values) > 0:
+                                # 仍然使用中位數，但記錄警告
+                                fill_value = valid_values.median()
+                            else:
+                                fill_value = 0
+                                
+                        logger.warning(f"列 '{col}' 將使用 {fill_value} 填充所有 {invalid_count} 個無效值，但建議後續分析")
+                    elif invalid_ratio > 0.2:
+                        # 20%-50%的無效值 - 考慮使用更複雜的插補方法
+                        logger.warning(f"列 '{col}' 有高比例({invalid_ratio:.2%})的無效值")
+                        
+                        if len(valid_values) > 0:
+                            # 1. 基於有效值分布的填充
+                            value_distribution = valid_values.value_counts(normalize=True)
+                            # 檢查是否具有明顯的模式/集群
+                            if len(value_distribution) > 0 and value_distribution.iloc[0] > 0.7:
+                                # 有明顯的主導值，使用最常見的值
+                                fill_value = value_distribution.index[0]
+                                logger.info(f"列 '{col}' 使用最常見值 {fill_value} 填充無效值")
+                            else:
+                                # 使用中位數填充，但考慮兩側分布
+                                fill_value = valid_values.median()
+                                logger.info(f"列 '{col}' 使用中位數 {fill_value} 填充無效值")
+                        else:
+                            fill_value = 0
+                            logger.warning(f"列 '{col}' 沒有有效值，使用 0 填充")
                     else:
-                        median_value = 0  # 如果沒有有效值，使用0
+                        # 少量無效值 - 使用中位數替換
+                        if len(valid_values) > 0:
+                            fill_value = valid_values.median()
+                            logger.info(f"列 '{col}' 使用中位數 {fill_value} 填充少量無效值")
+                        else:
+                            fill_value = 0
+                            logger.warning(f"列 '{col}' 沒有有效值，使用 0 填充")
                     
                     # 替換無效值
-                    num_features_cleaned.loc[mask_invalid, col] = median_value
-                    
-                    logger.warning(f"列 '{col}' 中發現 {mask_invalid.sum()} 個無效值 (inf/NaN/極大值)，已替換為中位數 {median_value}")
-                    
-                # 將值限制在合理範圍內
-                upper_limit = num_features_cleaned[col].quantile(0.99) * 1.5
-                lower_limit = num_features_cleaned[col].quantile(0.01) * 0.5
+                    num_features_cleaned.loc[mask_invalid, col] = fill_value
                 
-                # 處理極端值的邊界情況
-                if upper_limit == lower_limit:
-                    # 如果上下限相同，擴大範圍
-                    if upper_limit == 0:
-                        upper_limit = 1
-                        lower_limit = -1
-                    else:
-                        upper_limit = upper_limit * 2
-                        lower_limit = lower_limit * 0.5
+                # 確認是否需要處理極端值
+                treat_outliers = True
+                if col in invalid_value_stats and invalid_value_stats[col]['percentage'] > 40:
+                    # 如果有大量無效值，可能該特徵已經有問題，不必再做極端值處理
+                    logger.warning(f"列 '{col}' 由於高比例無效值，跳過極端值處理")
+                    treat_outliers = False
+                    
+                if treat_outliers:
+                    # 將值限制在合理範圍內
+                    try:
+                        # 使用IQR法則標識極端值
+                        q1 = num_features_cleaned[col].quantile(0.25)
+                        q3 = num_features_cleaned[col].quantile(0.75)
+                        iqr = q3 - q1
+                        
+                        # 使用更保守的邊界
+                        upper_limit = q3 + 3 * iqr
+                        lower_limit = q1 - 3 * iqr
+                        
+                        # 如果IQR太小，使用百分位數方法
+                        if iqr < 1e-10:
+                            upper_limit = num_features_cleaned[col].quantile(0.99)
+                            lower_limit = num_features_cleaned[col].quantile(0.01)
+                        
+                        # 處理極端值的邊界情況
+                        if upper_limit == lower_limit:
+                            # 如果上下限相同，擴大範圍
+                            if upper_limit == 0:
+                                upper_limit = 1
+                                lower_limit = -1
+                            else:
+                                upper_limit = upper_limit * 2
+                                lower_limit = lower_limit * 0.5
+                        
+                        # 計算極端值的數量
+                        outlier_mask = (num_features_cleaned[col] > upper_limit) | (num_features_cleaned[col] < lower_limit)
+                        outlier_count = outlier_mask.sum()
+                        
+                        if outlier_count > 0:
+                            # 記錄極端值處理
+                            if col not in invalid_value_stats:
+                                invalid_value_stats[col] = {}
+                            invalid_value_stats[col]['outliers'] = outlier_count
+                            invalid_value_stats[col]['outlier_percentage'] = outlier_count / len(num_features_cleaned) * 100
+                            
+                            # 截斷極端值
+                            num_features_cleaned[col] = num_features_cleaned[col].clip(lower_limit, upper_limit)
+                            logger.info(f"列 '{col}' 處理了 {outlier_count} 個極端值 ({outlier_count/len(num_features_cleaned):.2%})")
+                    except Exception as e:
+                        logger.warning(f"處理列 '{col}' 極端值時出錯: {str(e)}")
                 
-                # 截斷極端值
-                num_features_cleaned[col] = num_features_cleaned[col].clip(lower_limit, upper_limit)
+            # 如果發現了無效值，記錄詳細信息到日誌
+            if invalid_value_stats:
+                logger.warning(f"無效值處理摘要:")
+                for col, stats in invalid_value_stats.items():
+                    if 'total' in stats:
+                        logger.warning(f"  - {col}: {stats['total']} 無效值 ({stats['percentage']:.2f}%), " +
+                                       f"包括 {stats.get('inf_count', 0)} inf, {stats.get('nan_count', 0)} NaN, " +
+                                       f"{stats.get('large_count', 0)} 極大值")
+                    if 'outliers' in stats:
+                        logger.warning(f"    且 {stats['outliers']} 極端值 ({stats['outlier_percentage']:.2f}%)")
             
             # 標準化數值特徵
             num_cols = num_features_cleaned.columns
