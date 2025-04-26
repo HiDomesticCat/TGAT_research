@@ -396,6 +396,82 @@ class EnhancedMemoryOptimizedDataLoader:
         
         return df_copy
         
+    def _identify_target_column(self):
+        """智能識別目標列（標籤欄位）
+        
+        使用多種啟發式方法確定資料集中的目標/標籤列:
+        1. 檢查配置中是否指定了目標列
+        2. 檢查常見的標籤列名稱
+        3. 分析列特性（分類特性、熵、唯一值比例等）
+        4. 如果都不行，回退到使用最後一列
+        
+        Returns:
+            str: 目標列名稱
+        """
+        # 1. 優先使用配置中指定的目標列
+        if hasattr(self, 'target_column') and self.target_column:
+            if self.target_column in self.df.columns:
+                logger.info(f"使用配置中指定的目標列: '{self.target_column}'")
+                return self.target_column
+                
+        # 2. 檢查常見的標籤欄位名稱
+        common_target_columns = [
+            'label', 'Label', 'target', 'Target', 'class', 'Class', 
+            'attack_type', 'is_attack', 'is_malicious', 'result', 'Result',
+            'y', 'Y', 'output', 'classification', 'category', 'type'
+        ]
+        
+        for col in common_target_columns:
+            if col in self.df.columns:
+                logger.info(f"根據名稱匹配識別到的目標列: '{col}'")
+                return col
+                
+        # 3. 嘗試通過列特徵識別目標列
+        # 目標列通常是分類型，字串型，或整數型（小範圍）
+        candidate_cols = []
+        
+        for col in self.df.columns:
+            # 跳過明顯不是標籤的列
+            if any(skip in col.lower() for skip in ['id', 'timestamp', 'date', 'time', 'feature']):
+                continue
+                
+            # 檢查資料類型與分布特徵
+            col_data = self.df[col]
+            unique_ratio = col_data.nunique() / len(col_data)
+            
+            # 目標列通常有有限的唯一值且分布較均勻
+            if unique_ratio < 0.05 and unique_ratio > 0.0001:
+                candidate_score = 0
+                
+                # 分類特徵得分更高
+                if pd.api.types.is_categorical_dtype(col_data) or pd.api.types.is_object_dtype(col_data):
+                    candidate_score += 5
+                    
+                # 整數型特徵且範圍小也可能是標籤
+                elif pd.api.types.is_integer_dtype(col_data):
+                    value_range = col_data.max() - col_data.min()
+                    if value_range < 100:  # 小範圍整數更可能是標籤
+                        candidate_score += 3
+                
+                # 出現在列名最後面的列通常更可能是標籤
+                position_score = 1.0 - (list(self.df.columns).index(col) / len(self.df.columns))
+                candidate_score += position_score * 2
+                
+                candidate_cols.append((col, candidate_score))
+        
+        # 如果有候選列，選擇得分最高的
+        if candidate_cols:
+            # 按得分降序排序
+            candidate_cols.sort(key=lambda x: x[1], reverse=True)
+            best_col, score = candidate_cols[0]
+            logger.info(f"根據列特徵分析識別到的目標列: '{best_col}' (得分: {score:.2f})")
+            return best_col
+            
+        # 4. 如果沒有找到合適的目標列，使用最後一列
+        last_col = self.df.columns[-1]
+        logger.warning(f"無法確定目標列，使用最後一列 '{last_col}' 作為目標")
+        return last_col
+        
     def preprocess(self):
         """預處理資料 - 對數值和分類特徵進行標準化和編碼"""
         logger.info("開始預處理資料...")
@@ -407,20 +483,9 @@ class EnhancedMemoryOptimizedDataLoader:
         if self.df is None or self.df.empty:
             raise ValueError("資料載入失敗，無法進行預處理")
             
-        # 進行特徵和目標分離
-        # 尋找常見的目標列名
-        target_columns = ['label', 'class', 'target', 'attack_type', 'is_attack']
-        target_col = None
-        
-        for col in target_columns:
-            if col in self.df.columns:
-                target_col = col
-                break
-                
-        if target_col is None:
-            # 假設最後一列是目標
-            target_col = self.df.columns[-1]
-            logger.warning(f"未找到明確的目標列，使用最後一列 '{target_col}' 作為目標")
+        # 進行特徵和目標分離 - 使用智能識別
+        target_col = self._identify_target_column()
+        logger.info(f"識別到目標列: '{target_col}'")
         
         # 提取特徵和目標
         self.target = self.df[target_col]
