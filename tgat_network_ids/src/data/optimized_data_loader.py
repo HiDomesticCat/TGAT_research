@@ -422,18 +422,23 @@ class EnhancedMemoryOptimizedDataLoader:
         return features_exist and target_exist
         
     def _save_preprocessed_data(self):
-        """保存預處理後的資料，並支援斷點續傳功能"""
+        """保存預處理後的資料，使用多檔案分片儲存策略避免單一大型檔案"""
         # 確保目錄存在
         if not os.path.exists(self.preprocessed_path):
             os.makedirs(self.preprocessed_path)
             
+        # 建立分片目錄
+        features_dir = os.path.join(self.preprocessed_path, 'features_chunks')
+        if not os.path.exists(features_dir):
+            os.makedirs(features_dir)
+            
         # 創建一個淺拷貝用於保存，避免修改原始資料
-        logger.info("準備保存預處理資料...")
+        logger.info("準備保存預處理資料 (使用分片儲存策略)...")
         
-        # 創建檢查點檔案路徑
+        # 創建檢查點檔案路徑與其他必要的檔案
         checkpoint_path = os.path.join(self.preprocessed_path, 'checkpoint.json')
-        feature_csv_path = os.path.join(self.preprocessed_path, 'features.csv')
         target_csv_path = os.path.join(self.preprocessed_path, 'target.csv')
+        metadata_path = os.path.join(self.preprocessed_path, 'features_metadata.json')
         
         # 檢查是否已存在處理檢查點
         current_chunk = 0
@@ -449,7 +454,7 @@ class EnhancedMemoryOptimizedDataLoader:
                 current_chunk = 0
         
         # 分塊保存策略，避免記憶體溢出
-        chunk_size = 1000000  # 每個分塊的行數
+        chunk_size = 500000  # 減小每個分塊的行數，避免後續讀取時的記憶體問題
         total_rows = len(self.features)
         chunks = list(range(0, total_rows, chunk_size)) + [total_rows]
         total_chunks = len(chunks) - 1
@@ -460,25 +465,48 @@ class EnhancedMemoryOptimizedDataLoader:
         if ip_cols:
             logger.info(f"檢測到可能包含大量唯一值的欄位: {ip_cols}")
         
-        # 如果是從頭開始，則先寫入標頭
+        # 儲存列名和資料類型資訊，以便後續載入重建
         if current_chunk == 0:
-            with open(feature_csv_path, 'w') as f:
-                self.features.iloc[0:0].to_csv(f, index=False)
+            # 儲存特徵元數據
+            columns = list(self.features.columns)
+            dtypes = {col: str(self.features[col].dtype) for col in columns}
+            
+            # 記錄重要的中繼資料
+            metadata = {
+                'columns': columns,
+                'dtypes': dtypes,
+                'total_rows': total_rows,
+                'chunk_size': chunk_size,
+                'total_chunks': total_chunks,
+                'high_cardinality_columns': ip_cols,
+                'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            }
+            
+            # 儲存元數據
+            with open(metadata_path, 'w') as f:
+                json.dump(metadata, f, indent=2)
                 
+            logger.info(f"已儲存特徵元數據: {metadata_path}")
+            
             # 保存目標變數 (通常體積較小，可一次處理)
             pd.DataFrame({'target': self.target}).to_csv(target_csv_path, index=False)
             logger.info(f"目標資料已保存至CSV: {target_csv_path}")
-        else:
-            # 如果是繼續處理，則使用追加模式
-            logger.info(f"繼續向 {feature_csv_path} 追加資料")
-            
-        # 分塊保存特徵資料
+        
+        # 分塊保存特徵資料 - 每個分塊儲存為獨立檔案
         import json
         for i in range(current_chunk, total_chunks):
             start_idx = chunks[i]
             end_idx = chunks[i+1]
             
             try:
+                # 定義此分塊的檔案路徑
+                chunk_path = os.path.join(features_dir, f'chunk_{i:05d}.parquet')
+                
+                # 檢查是否已存在此分塊檔案（支援續傳）
+                if os.path.exists(chunk_path):
+                    logger.info(f"分塊檔案已存在，跳過：{chunk_path}")
+                    continue
+                
                 # 取出當前分塊
                 chunk = self.features.iloc[start_idx:end_idx].copy()
                 
@@ -496,11 +524,15 @@ class EnhancedMemoryOptimizedDataLoader:
                         except Exception as e:
                             logger.warning(f"轉換列 '{col}' 失敗: {str(e)}，保持原狀")
                 
-                # 追加到CSV
-                with open(feature_csv_path, 'a') as f:
-                    chunk.to_csv(f, index=False, header=False)
+                # 儲存為獨立的 Parquet 檔案
+                if POLARS_AVAILABLE:
+                    # 使用 Polars 高效保存 Parquet (更節省記憶體)
+                    pl.from_pandas(chunk).write_parquet(chunk_path)
+                else:
+                    # 回退到 Pandas
+                    chunk.to_parquet(chunk_path, index=False)
                     
-                logger.info(f"已保存分塊 {i+1}/{total_chunks}: 行 {start_idx}-{end_idx}")
+                logger.info(f"已保存分塊 {i+1}/{total_chunks} 至獨立檔案: {chunk_path}")
                 
                 # 更新檢查點
                 with open(checkpoint_path, 'w') as f:
@@ -524,7 +556,7 @@ class EnhancedMemoryOptimizedDataLoader:
                 logger.info(f"已保存檢查點，可在程式重啟後從批次 {i} 繼續處理")
                 raise  # 重新引發異常，讓上層捕獲
         
-        logger.info(f"特徵資料已全部保存至CSV: {feature_csv_path}")
+        logger.info(f"特徵資料已全部保存為分片檔案: {features_dir}")
         
         # 嘗試使用 Polars 進行高效率 Parquet 轉換（低記憶體方式）
         try:
