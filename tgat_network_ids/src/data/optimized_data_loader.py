@@ -768,29 +768,381 @@ class EnhancedMemoryOptimizedDataLoader:
         
         return batch_features.values, batch_labels.values, random_indices
         
-    def get_temporal_edges(self, max_edges=None):
-        """獲取時間性邊 - 根據連續封包之間的時間關係生成"""
-        logger.info("生成時間性邊...")
+    def _extract_network_features(self, data_subset):
+        """從網路流量中提取有意義的特徵
         
-        # 確保特徵已準備好
-        if self.features is None:
-            self.preprocess()
-            
-        # 檢查是否有時間戳列
-        time_cols = [col for col in self.feature_names if 'time' in col.lower()]
+        基於網路安全領域知識，從數據中提取能更好描述網路連接特徵的屬性
         
-        if not time_cols:
-            logger.warning("未找到時間戳列，使用隨機生成的時間性邊")
-            # 隨機生成邊
-            edges = []
-            num_nodes = len(self.features)
+        Args:
+            data_subset: 包含足夠網路連接信息的DataFrame子集
             
-            # 限制最大邊數
-            if max_edges is None:
-                max_edges = min(500000, num_nodes * 10)
+        Returns:
+            pd.DataFrame: 包含提取特徵的DataFrame
+        """
+        features = {}
+        
+        # 檢測IP地址列
+        src_ip_cols = [col for col in data_subset.columns if any(term in col.lower() for term in ['src_ip', 'source_ip', 'srcip', 'src address'])]
+        dst_ip_cols = [col for col in data_subset.columns if any(term in col.lower() for term in ['dst_ip', 'dest_ip', 'dstip', 'destination_ip', 'dst address'])]
+        
+        # 檢測端口列
+        src_port_cols = [col for col in data_subset.columns if any(term in col.lower() for term in ['src_port', 'source_port', 'srcport', 'src port'])]
+        dst_port_cols = [col for col in data_subset.columns if any(term in col.lower() for term in ['dst_port', 'dest_port', 'dstport', 'destination_port', 'dst port'])]
+        
+        # 檢測協議列
+        protocol_cols = [col for col in data_subset.columns if any(term in col.lower() for term in ['proto', 'protocol', 'service'])]
+        
+        # 檢測長度/大小列
+        size_cols = [col for col in data_subset.columns if any(term in col.lower() for term in ['size', 'length', 'bytes', 'packet_len'])]
+        
+        # 檢測時間相關列
+        time_cols = [col for col in data_subset.columns if any(term in col.lower() for term in ['time', 'timestamp', 'date'])]
+        
+        # 檢測flags列
+        flag_cols = [col for col in data_subset.columns if any(term in col.lower() for term in ['flag', 'flags', 'tcp_flag'])]
+        
+        # 提取通信元組
+        if src_ip_cols and dst_ip_cols:
+            src_ip_col = src_ip_cols[0]
+            dst_ip_col = dst_ip_cols[0]
+            
+            # 通信元組: 源IP-目標IP對
+            features['ip_pairs'] = list(zip(data_subset[src_ip_col], data_subset[dst_ip_col]))
+            
+            # 如果有端口信息，增加到通信元組
+            if src_port_cols and dst_port_cols:
+                src_port_col = src_port_cols[0]
+                dst_port_col = dst_port_cols[0]
                 
+                # 完整通信五元組: 源IP+端口-目標IP+端口+協議
+                if protocol_cols:
+                    protocol_col = protocol_cols[0]
+                    features['connection_tuples'] = list(zip(
+                        data_subset[src_ip_col], data_subset[src_port_col],
+                        data_subset[dst_ip_col], data_subset[dst_port_col],
+                        data_subset[protocol_col]
+                    ))
+                else:
+                    # 四元組: 無協議信息
+                    features['connection_tuples'] = list(zip(
+                        data_subset[src_ip_col], data_subset[src_port_col],
+                        data_subset[dst_ip_col], data_subset[dst_port_col]
+                    ))
+        
+        # 提取連接時序
+        if time_cols:
+            time_col = time_cols[0]
+            features['timestamps'] = data_subset[time_col].values
+            
+            # 提取連接時間間隔
+            if len(data_subset) > 1:
+                # 確保時間格式正確
+                if pd.api.types.is_numeric_dtype(data_subset[time_col]):
+                    # 如果已經是數值型
+                    sorted_times = np.sort(data_subset[time_col].values)
+                    # 計算時間差
+                    time_diffs = np.diff(sorted_times)
+                    features['time_intervals'] = time_diffs
+                else:
+                    # 嘗試轉換為數值型
+                    try:
+                        # 轉換為日期時間
+                        datetime_series = pd.to_datetime(data_subset[time_col])
+                        # 轉換為Unix時間戳
+                        timestamp_series = datetime_series.astype('int64') // 10**9
+                        sorted_times = np.sort(timestamp_series.values)
+                        # 計算時間差
+                        time_diffs = np.diff(sorted_times)
+                        features['time_intervals'] = time_diffs
+                    except Exception as e:
+                        logger.warning(f"無法計算時間間隔: {str(e)}")
+        
+        # 提取封包大小分佈
+        if size_cols:
+            size_col = size_cols[0]
+            features['packet_sizes'] = data_subset[size_col].values
+            
+            # 計算基本統計值
+            features['mean_size'] = data_subset[size_col].mean()
+            features['std_size'] = data_subset[size_col].std()
+            features['max_size'] = data_subset[size_col].max()
+            
+        # 提取協議分佈
+        if protocol_cols:
+            protocol_col = protocol_cols[0]
+            features['protocols'] = data_subset[protocol_col].value_counts().to_dict()
+            
+        # 提取旗標信息
+        if flag_cols:
+            flag_col = flag_cols[0]
+            features['flags'] = data_subset[flag_col].value_counts().to_dict()
+            
+        return features
+    
+    def _create_network_edges(self, data_subset, max_edges=None):
+        """基於網路語義創建有意義的邊關係
+        
+        利用網路流量的結構特徵創建真實反映網路拓撲的邊關係。生成的邊基於以下關係:
+        1. 通信流：從源IP/端口到目標IP/端口的有向邊
+        2. 服務聚類：共享相同服務(協議+端口)的節點間建立邊
+        3. 時間關係：時間上接近的封包間建立邊，捕捉可能的因果關係
+        4. 行為關係：具有相似行為模式的節點間建立邊
+        
+        Args:
+            data_subset: 包含網路流量信息的DataFrame子集
+            max_edges: 最大邊數量限制
+            
+        Returns:
+            list: 邊列表，每個邊為(源節點,目標節點,時間戳,特徵)的元組
+        """
+        edges = []
+        
+        # 提取網路特徵
+        network_features = self._extract_network_features(data_subset)
+        
+        # 獲取節點數量
+        num_nodes = len(data_subset)
+        if num_nodes < 2:
+            logger.warning("節點數量不足，無法創建有意義的邊")
+            return edges
+            
+        # 1. 基於通信流創建邊 (源IP→目標IP)
+        if 'ip_pairs' in network_features:
+            ip_pairs = network_features['ip_pairs']
+            # 創建IP到索引的映射
+            unique_ips = set()
+            for src_ip, dst_ip in ip_pairs:
+                unique_ips.add(src_ip)
+                unique_ips.add(dst_ip)
+                
+            ip_to_idx = {ip: idx for idx, ip in enumerate(unique_ips)}
+            
+            # 創建通信流邊
+            timestamps = network_features.get('timestamps', [np.random.random() * 100] * len(ip_pairs))
+            
+            for i, (src_ip, dst_ip) in enumerate(ip_pairs):
+                if src_ip in ip_to_idx and dst_ip in ip_to_idx:
+                    src_idx = ip_to_idx[src_ip]
+                    dst_idx = ip_to_idx[dst_ip]
+                    
+                    # 只有源和目標不同時才創建邊
+                    if src_idx != dst_idx:
+                        # 獲取時間戳
+                        if i < len(timestamps):
+                            timestamp = timestamps[i]
+                        else:
+                            timestamp = np.random.random() * 100
+                            
+                        # 創建邊特徵：協議類型、封包大小、時間差異
+                        edge_features = []
+                        
+                        # 如果有協議信息，添加到特徵
+                        if 'protocols' in network_features:
+                            protocol_feature = next(iter(network_features['protocols'].items()))[1] / sum(network_features['protocols'].values())
+                            edge_features.append(protocol_feature)
+                        else:
+                            edge_features.append(0.5)  # 默認協議特徵
+                            
+                        # 如果有封包大小信息，添加到特徵
+                        if 'packet_sizes' in network_features and i < len(network_features['packet_sizes']):
+                            size_feature = min(1.0, network_features['packet_sizes'][i] / network_features['max_size'])
+                            edge_features.append(size_feature)
+                        else:
+                            edge_features.append(0.5)  # 默認大小特徵
+                            
+                        # 如果有時間差異信息，添加到特徵
+                        if 'time_intervals' in network_features and i < len(network_features['time_intervals']):
+                            time_diff = network_features['time_intervals'][i]
+                            # 歸一化時間差異
+                            max_interval = np.max(network_features['time_intervals'])
+                            if max_interval > 0:
+                                time_feature = min(1.0, time_diff / max_interval)
+                            else:
+                                time_feature = 0.5
+                            edge_features.append(time_feature)
+                        else:
+                            edge_features.append(0.5)  # 默認時間特徵
+                        
+                        # 添加邊
+                        edges.append((src_idx, dst_idx, timestamp, edge_features))
+                        
+            logger.info(f"基於通信流創建了 {len(edges)} 條邊")
+            
+        # 2. 基於服務聚類創建邊 (共享相同服務的節點間)
+        if 'connection_tuples' in network_features:
+            # 根據服務(端口+協議)創建聚類
+            service_to_nodes = {}
+            
+            for i, conn_tuple in enumerate(network_features['connection_tuples']):
+                # 提取服務信息
+                if len(conn_tuple) >= 5:  # 5元組
+                    src_ip, src_port, dst_ip, dst_port, protocol = conn_tuple
+                    src_service = f"{src_port}_{protocol}"
+                    dst_service = f"{dst_port}_{protocol}"
+                else:  # 4元組
+                    src_ip, src_port, dst_ip, dst_port = conn_tuple
+                    src_service = f"{src_port}"
+                    dst_service = f"{dst_port}"
+                
+                # IP到索引的映射
+                if 'ip_pairs' in network_features:
+                    ip_to_idx = {ip: idx for idx, ip in enumerate(set([p[0] for p in network_features['ip_pairs']] + [p[1] for p in network_features['ip_pairs']]))}
+                else:
+                    # 直接使用節點索引
+                    ip_to_idx = {ip: i for i, ip in enumerate(set([src_ip, dst_ip]))}
+                
+                # 添加到服務映射
+                if src_service not in service_to_nodes:
+                    service_to_nodes[src_service] = set()
+                service_to_nodes[src_service].add(ip_to_idx[src_ip])
+                
+                if dst_service not in service_to_nodes:
+                    service_to_nodes[dst_service] = set()
+                service_to_nodes[dst_service].add(ip_to_idx[dst_ip])
+            
+            # 為每個服務聚類創建邊
+            service_edges_count = 0
+            for service, nodes in service_to_nodes.items():
+                nodes_list = list(nodes)
+                # 如果服務至少有2個節點
+                if len(nodes_list) >= 2:
+                    # 隨機選擇一個中心節點
+                    center_node = np.random.choice(nodes_list)
+                    
+                    # 從中心節點連接到其他節點
+                    for node in nodes_list:
+                        if node != center_node:
+                            # 使用服務相關的隨機時間戳
+                            timestamp = np.random.random() * 100
+                            # 創建邊特徵：服務類型
+                            edge_features = [0.7, 0.5, 0.5]  # 服務邊的特徵與通信流邊區分
+                            
+                            edges.append((center_node, node, timestamp, edge_features))
+                            service_edges_count += 1
+                            
+                            # 檢查是否達到最大邊數
+                            if max_edges is not None and len(edges) >= max_edges:
+                                logger.info(f"達到最大邊數限制: {max_edges}")
+                                return edges
+            
+            logger.info(f"基於服務聚類創建了 {service_edges_count} 條邊")
+            
+        # 3. 基於時間關係創建邊
+        if 'timestamps' in network_features and len(network_features['timestamps']) > 1:
+            # 對時間戳進行排序並獲取索引
+            sorted_time_indices = np.argsort(network_features['timestamps'])
+            
+            # 時間窗口大小 - 可以根據數據特性調整
+            time_window_size = np.percentile(network_features.get('time_intervals', [1.0]), 25)  # 使用第一四分位數作為窗口大小
+            if time_window_size <= 0:
+                time_window_size = 1.0  # 最小窗口大小
+                
+            # 創建時間窗口內的連接
+            time_edges_count = 0
+            for i in range(1, len(sorted_time_indices)):
+                curr_idx = sorted_time_indices[i]
+                prev_idx = sorted_time_indices[i-1]
+                
+                # 檢查時間差是否在窗口內
+                curr_time = network_features['timestamps'][curr_idx]
+                prev_time = network_features['timestamps'][prev_idx]
+                time_diff = abs(curr_time - prev_time)
+                
+                if time_diff <= time_window_size:
+                    # 創建時間關係邊
+                    timestamp = curr_time
+                    # 創建邊特徵：時間接近度
+                    proximity = 1.0 - (time_diff / time_window_size)
+                    edge_features = [0.3, 0.3, proximity]
+                    
+                    edges.append((prev_idx, curr_idx, timestamp, edge_features))
+                    time_edges_count += 1
+                    
+                    # 檢查是否達到最大邊數
+                    if max_edges is not None and len(edges) >= max_edges:
+                        logger.info(f"達到最大邊數限制: {max_edges}")
+                        return edges
+            
+            logger.info(f"基於時間關係創建了 {time_edges_count} 條邊")
+        
+        # 補充: 如果邊數量不足，添加一些行為關係邊
+        if max_edges is not None and len(edges) < max_edges:
+            # 計算需要添加的邊數量
+            additional_edges_needed = max_edges - len(edges)
+            
+            # 只有在節點數足夠且需要添加邊時才執行
+            if additional_edges_needed > 0 and num_nodes > 3:
+                behavior_edges_count = 0
+                
+                # 基於節點特性創建行為關係邊
+                if isinstance(data_subset, pd.DataFrame) and data_subset.shape[1] > 2:
+                    # 選擇數值型特徵列
+                    num_cols = data_subset.select_dtypes(include=['number']).columns
+                    
+                    if len(num_cols) > 0:
+                        # 選擇一部分特徵列
+                        selected_cols = np.random.choice(num_cols, min(5, len(num_cols)), replace=False)
+                        
+                        # 計算所選特徵的聚類
+                        try:
+                            from sklearn.cluster import KMeans
+                            
+                            # 提取特徵矩陣
+                            feature_matrix = data_subset[selected_cols].values
+                            
+                            # 處理缺失值
+                            feature_matrix = np.nan_to_num(feature_matrix)
+                            
+                            # 確定聚類數
+                            n_clusters = min(5, num_nodes // 2)
+                            if n_clusters > 1:
+                                # 執行KMeans聚類
+                                kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
+                                clusters = kmeans.fit_predict(feature_matrix)
+                                
+                                # 根據聚類結果創建邊
+                                for cluster_id in range(n_clusters):
+                                    # 獲取屬於該聚類的節點
+                                    cluster_nodes = np.where(clusters == cluster_id)[0]
+                                    
+                                    if len(cluster_nodes) > 1:
+                                        # 選擇聚類中心
+                                        try:
+                                            # 找到離聚類中心最近的點
+                                            distances = kmeans.transform(feature_matrix[cluster_nodes])
+                                            center_idx = cluster_nodes[np.argmin(distances[:, cluster_id])]
+                                        except:
+                                            # 如果失敗，隨機選取
+                                            center_idx = np.random.choice(cluster_nodes)
+                                        
+                                        # 從中心連接到聚類的其他節點
+                                        for node_idx in cluster_nodes:
+                                            if node_idx != center_idx:
+                                                # 使用隨機時間戳
+                                                timestamp = np.random.random() * 100
+                                                # 創建邊特徵：聚類信息
+                                                edge_features = [0.2, 0.8, 0.4]  # 行為邊的特徵與其他邊區分
+                                                
+                                                edges.append((center_idx, node_idx, timestamp, edge_features))
+                                                behavior_edges_count += 1
+                                                
+                                                # 檢查是否已添加足夠多的邊
+                                                if behavior_edges_count >= additional_edges_needed:
+                                                    break
+                                        
+                                        if behavior_edges_count >= additional_edges_needed:
+                                            break
+                        except Exception as e:
+                            logger.warning(f"創建行為關係邊時出錯: {str(e)}")
+                
+                logger.info(f"基於行為關係創建了 {behavior_edges_count} 條補充邊")
+        
+        # 如果邊列表為空，回退到隨機邊生成
+        if not edges and max_edges is not None:
+            logger.warning("無法基於網路語義創建邊，回退到隨機邊生成")
+            
             # 生成隨機邊
-            for _ in range(max_edges):
+            for _ in range(min(max_edges, num_nodes * 5)):
                 src = np.random.randint(0, num_nodes)
                 dst = np.random.randint(0, num_nodes)
                 
@@ -799,46 +1151,32 @@ class EnhancedMemoryOptimizedDataLoader:
                     dst = np.random.randint(0, num_nodes)
                     
                 # 生成隨機時間戳和特徵
-                timestamp = np.random.random() * 100  # 隨機時間戳
-                edge_feat = [np.random.random() for _ in range(3)]  # 隨機3維邊特徵
+                timestamp = np.random.random() * 100
+                edge_feat = [np.random.random() for _ in range(3)]
                 
                 edges.append((src, dst, timestamp, edge_feat))
                 
-            logger.info(f"隨機生成了 {len(edges)} 條時間性邊")
-            return edges
-            
-        # 使用時間戳生成邊
-        logger.info(f"使用時間戳列 '{time_cols[0]}' 生成時間性邊")
-        time_col = time_cols[0]
+            logger.info(f"隨機生成了 {len(edges)} 條邊")
         
-        # 排序特徵按時間戳
-        sorted_indices = np.argsort(self.features[time_col].values)
+        return edges
+    
+    def get_temporal_edges(self, max_edges=None):
+        """獲取時間性邊 - 基於網路流量語義生成更合理的邊關係"""
+        logger.info("基於網路流量語義生成圖邊...")
         
-        # 生成邊 - 連接時間上相鄰的節點
-        edges = []
+        # 確保特徵已準備好
+        if self.features is None:
+            self.preprocess()
+            
+        # 檢查是否有足夠的數據
+        if len(self.features) < 2:
+            logger.warning("數據點不足，無法創建有意義的邊")
+            return []
+            
+        # 使用網路流量語義創建邊
+        edges = self._create_network_edges(self.features, max_edges)
         
-        for i in range(1, len(sorted_indices)):
-            src = sorted_indices[i-1]
-            dst = sorted_indices[i]
-            
-            # 獲取時間戳
-            timestamp = self.features[time_col].values[dst]
-            
-            # 生成簡單的邊特徵
-            edge_feat = [np.random.random() for _ in range(3)]
-            
-            edges.append((src, dst, timestamp, edge_feat))
-            
-            # 隨機添加額外連接以增加圖密度
-            if np.random.random() < 0.3:  # 30%機率添加額外連接
-                extra_dst = sorted_indices[max(0, i-2)]  # 連接到前面的節點
-                edges.append((src, extra_dst, timestamp, edge_feat))
-                
-            # 限制最大邊數
-            if max_edges is not None and len(edges) >= max_edges:
-                break
-                
-        logger.info(f"基於時間戳生成了 {len(edges)} 條時間性邊")
+        logger.info(f"總共生成 {len(edges)} 條基於網路語義的邊")
         return edges
         
     def _check_preprocessed_exists(self):
