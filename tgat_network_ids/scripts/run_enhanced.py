@@ -228,17 +228,32 @@ def main():
         logger.info("Starting graph building...")
         graph_builder = OptimizedGraphBuilder(full_config, device=str(device))
         
-        # Create model
+        # Create model with default parameters if not in config
         logger.info("Creating model...")
+        model_config = config.get('model', {})
+        
+        # Set default values for required parameters if not found in config
+        input_dim = model_config.get('input_dim', 128)  # Default input dimension
+        hidden_dim = model_config.get('hidden_dim', 64) 
+        out_dim = model_config.get('out_dim', 64)
+        time_dim = model_config.get('time_dim', 16)
+        num_layers = model_config.get('num_layers', 2)
+        num_heads = model_config.get('num_heads', 4)
+        dropout = model_config.get('dropout', 0.2)
+        num_classes = model_config.get('num_classes', 2)  # Default: binary classification
+        
+        logger.info(f"Model parameters: input_dim={input_dim}, hidden_dim={hidden_dim}, out_dim={out_dim}, "
+                    f"num_classes={num_classes}, num_layers={num_layers}, num_heads={num_heads}")
+        
         model = OptimizedTGATModel(
-            in_dim=config['model']['input_dim'],
-            hidden_dim=config['model']['hidden_dim'],
-            out_dim=config['model']['output_dim'],
-            time_dim=config['model']['time_dim'],
-            num_layers=config['model']['num_layers'],
-            num_heads=config['model']['num_heads'],
-            dropout=config['model']['dropout'],
-            num_classes=config['model']['num_classes']
+            in_dim=input_dim,
+            hidden_dim=hidden_dim,
+            out_dim=out_dim,
+            time_dim=time_dim,
+            num_layers=num_layers,
+            num_heads=num_heads,
+            dropout=dropout,
+            num_classes=num_classes
         )
         
         # Check if using mixed precision training

@@ -5,7 +5,7 @@ data:
   test_size: 0.3                  # 測試集比例
   random_state: 42                # 隨機種子
   batch_size: 512                 # 使用較大的批次大小提高效率
-  
+
   # 記憶體優化相關配置 - 平衡設置
   use_memory_mapping: true        # 使用記憶體映射加速讀取
   save_preprocessed: true         # 保存預處理資料以便重用
@@ -14,7 +14,7 @@ data:
   chunk_size_mb: 1024             # 增加塊大小以減少磁碟IO次數
   use_compression: true           # 啟用壓縮以減少記憶體使用
   compression_format: "gzip"      # gzip提供良好的壓縮率與解壓速度平衡
-  
+
   # 資料採樣相關配置 - 更高效的設置
   use_sampling: true              # 啟用資料採樣以減少資料量
   sampling_strategy: "stratified" # 使用分層採樣確保各類攻擊模式都有足夠表示
@@ -24,7 +24,7 @@ data:
 # 圖結構相關配置 - 效能優化設置
 graph:
   temporal_window: 300            # 使用更合理的時間窗口
-  
+
   # 記憶體優化相關配置
   use_subgraph_sampling: true     # 使用子圖採樣加速訓練
   max_nodes_per_subgraph: 5000    # 增加子圖大小提高模型效果
@@ -36,41 +36,43 @@ graph:
 
 # 模型相關配置 - 平衡效能和記憶體的設置
 model:
-  hidden_dim: 64                  # 增加隱藏層維度提高模型表現
-  out_dim: 64                     # 增加輸出維度提高模型表現
-  time_dim: 16                    # 增加時間編碼維度提高時間特徵表示
-  num_layers: 2                   # 使用更合適的層數平衡效能和複雜度
-  num_heads: 4                    # 增加注意力頭數提高特徵學習能力
-  dropout: 0.2                    # 調整丟棄率更好地平衡正則化
-  
+  input_dim: 128                  # 輸入特徵維度
+  hidden_dim: 64                  # 隱藏層維度
+  out_dim: 64                     # 輸出維度
+  time_dim: 16                    # 時間編碼維度
+  num_layers: 2                   # 層數
+  num_heads: 4                    # 注意力頭數
+  dropout: 0.2                    # 丟棄率
+  num_classes: 2                  # 分類數量 (如二分類問題)
+
   # 記憶體優化相關配置
   use_mixed_precision: true       # 使用混合精度加速訓練
-  use_gradient_accumulation: true
-  gradient_accumulation_steps: 4  # 使用合適的梯度累積步數
-  use_gradient_checkpointing: false # 禁用梯度檢查點提高訓練速度
+  use_gradient_accumulation: true # 啟用梯度累積
+  gradient_accumulation_steps: 4  # 梯度累積步數
+  use_gradient_checkpointing: false # 是否使用梯度檢查點 (節省顯存但降低速度)
 
 # 訓練相關配置 - 效能優化設置
 train:
-  lr: 0.002                       # 適當調整學習率平衡收斂速度和穩定性
-  weight_decay: 5e-5              # 調整權重衰減平衡正則化效果
-  epochs: 50                      # 增加訓練輪數提高模型表現
-  patience: 5                     # 增加早停耐心值避免過早停止
-  batch_size: 1024                # 增加批次大小提高訓練效率
-  
+  learning_rate: 0.002            # 學習率
+  weight_decay: 5e-5              # 權重衰減
+  epochs: 50                      # 訓練輪數
+  patience: 5                     # 早停耐心值
+  batch_size: 1024                # 批次大小
+
   # 記憶體優化相關配置
   use_dynamic_batch_size: true    # 動態調整批次大小
-  memory_threshold: 0.8           # 提高記憶體閾值減少批次大小調整頻率
+  memory_threshold: 0.8           # 記憶體閾值
   use_progressive_training: true  # 使用漸進式訓練
-  progressive_training_initial_ratio: 0.5  # 提高初始比例加速訓練
-  progressive_training_growth_rate: 0.2    # 增加成長率加速訓練
+  progressive_training_initial_ratio: 0.5  # 初始比例
+  progressive_training_growth_rate: 0.2    # 成長率
 
 # 檢測相關配置
 detection:
-  threshold: 0.65                 # 保持檢測閾值
-  window_size: 60                 # 增加窗口大小提高準確性
+  threshold: 0.65                 # 檢測閾值
+  window_size: 60                 # 窗口大小
   use_sliding_window: true        # 使用滑動窗口
-  sliding_window_size: 120        # 增加滑動窗口提高準確性
-  sliding_window_step: 40         # 保持步長平衡效率和準確性
+  sliding_window_size: 120        # 滑動窗口大小
+  sliding_window_step: 40         # 滑動窗口步長
 
 # 輸出相關配置
 output:
@@ -83,13 +85,13 @@ output:
 # 系統相關配置 - 效能優化設置
 system:
   seed: 42                        # 隨機種子
-  device: "cuda"                  # 使用GPU加速
+  device: "cuda"                  # 使用設備
   gpu_id: 0                       # GPU ID
-  num_workers: 8                  # 增加工作線程數提高並行處理能力
-  pin_memory: true                # 使用固定記憶體加速GPU傳輸
-  
+  num_workers: 8                  # 工作線程數
+  pin_memory: true                # 使用固定記憶體
+
   # 記憶體優化相關配置
-  monitor_memory: false           # 關閉持續記憶體監控減少系統開銷
-  memory_monitor_interval: 300    # 大幅增加監控間隔減少CPU負載
-  clean_memory_interval: 30       # 增加清理間隔減少垃圾回收開銷
-  limit_gpu_memory: 0             # 不限制GPU記憶體以充分利用資源
+  monitor_memory: false           # 是否監控記憶體
+  memory_monitor_interval: 300    # 監控間隔
+  clean_memory_interval: 30       # 清理間隔
+  limit_gpu_memory: 0             # 限制GPU記憶體 (0表示不限制)
