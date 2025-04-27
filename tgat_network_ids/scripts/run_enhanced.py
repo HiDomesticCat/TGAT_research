@@ -269,12 +269,26 @@ def main():
         # Move model to device
         model.to(device)
         
+        # Get and convert learning rate and weight decay parameters with proper type conversion
+        try:
+            learning_rate = float(config['train'].get('learning_rate', 0.001))  # Default if missing
+        except (ValueError, TypeError):
+            learning_rate = 0.001
+            logger.warning(f"Invalid learning_rate value in config, using default: {learning_rate}")
+            
+        try:
+            weight_decay = float(config['train'].get('weight_decay', 5e-5))  # Default if missing
+        except (ValueError, TypeError):
+            weight_decay = 5e-5
+            logger.warning(f"Invalid weight_decay value in config, using default: {weight_decay}")
+            
         # Set up optimizer
         optimizer = torch.optim.Adam(
             model.parameters(),
-            lr=config['train'].get('learning_rate', 0.001),  # Default if missing
-            weight_decay=config['train'].get('weight_decay', 5e-5)  # Default if missing
+            lr=learning_rate,
+            weight_decay=weight_decay
         )
+        logger.info(f"Optimizer configured with lr={learning_rate}, weight_decay={weight_decay}")
         
         # Set up loss function
         criterion = torch.nn.CrossEntropyLoss()
@@ -287,6 +301,12 @@ def main():
             logger.info("Starting model training...")
             # Training logic...
             epochs = config['train'].get('epochs', 10)  # Default if missing
+            try:
+                epochs = int(epochs)
+            except (ValueError, TypeError):
+                epochs = 10
+                logger.warning(f"Invalid epochs value in config, using default: {epochs}")
+                
             for epoch in range(epochs):
                 logger.info(f"Epoch {epoch+1}/{epochs}")
                 # Train one epoch...
