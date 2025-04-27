@@ -168,7 +168,7 @@ def main():
             'test_size': config['data'].get('test_size', 0.2),
             'min_samples_per_class': config['data'].get('min_samples_per_class', 1000),
             # Add other necessary data configuration options
-            'batch_size': config['train'].get('batch_size', 64),  # Changed from 'training' to 'train'
+            'batch_size': config['train'].get('batch_size', 64),
             'memory_optimization': True
         }
     }
@@ -179,7 +179,7 @@ def main():
     if args.use_gpu is not None:
         config['model']['use_gpu'] = args.use_gpu
     if args.epochs:
-        config['train']['epochs'] = args.epochs  # Changed from 'training' to 'train'
+        config['train']['epochs'] = args.epochs
 
     # Set up output directories
     model_dir, results_dir, vis_dir, output_dir = setup_output_dirs(config)
@@ -206,6 +206,18 @@ def main():
     if use_gpu:
         torch.cuda.manual_seed_all(seed)
 
+    # Add sparse representation option to graph config
+    graph_config = config.get('graph', {})
+    graph_config['use_sparse_representation'] = args.use_sparse_representation
+
+    # Create full config object for graph builder
+    full_config = {
+        'data': config['data'],
+        'graph': graph_config,
+        'model': config['model'],
+        'system': config.get('system', {})
+    }
+
     # Use memory tracking context manager
     with track_memory_usage('Main function execution'):
         # Load data
@@ -214,10 +226,7 @@ def main():
         
         # Build graph
         logger.info("Starting graph building...")
-        graph_builder = OptimizedGraphBuilder(
-            data_loader,
-            use_sparse=args.use_sparse_representation
-        )
+        graph_builder = OptimizedGraphBuilder(full_config, device=str(device))
         
         # Create model
         logger.info("Creating model...")
@@ -248,8 +257,8 @@ def main():
         # Set up optimizer
         optimizer = torch.optim.Adam(
             model.parameters(),
-            lr=config['train']['learning_rate'],  # Changed from 'training' to 'train'
-            weight_decay=config['train']['weight_decay']  # Changed from 'training' to 'train'
+            lr=config['train'].get('learning_rate', 0.001),  # Default if missing
+            weight_decay=config['train'].get('weight_decay', 5e-5)  # Default if missing
         )
         
         # Set up loss function
@@ -262,7 +271,7 @@ def main():
         if mode == 'train':
             logger.info("Starting model training...")
             # Training logic...
-            epochs = config['train']['epochs']  # Changed from 'training' to 'train'
+            epochs = config['train'].get('epochs', 10)  # Default if missing
             for epoch in range(epochs):
                 logger.info(f"Epoch {epoch+1}/{epochs}")
                 # Train one epoch...
