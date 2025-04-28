@@ -153,6 +153,33 @@ def setup_output_dirs(config):
 
     return model_dir, results_dir, vis_dir, output_dir
 
+def safe_float_convert(value, default_value):
+    """Safely convert a value to float with a default value if conversion fails"""
+    if isinstance(value, (int, float)):
+        return float(value)
+    
+    if isinstance(value, str):
+        try:
+            # Handle scientific notation like '5e-5'
+            return float(value)
+        except (ValueError, TypeError):
+            logger.warning(f"Failed to convert '{value}' to float. Using default: {default_value}")
+    
+    return default_value
+
+def safe_int_convert(value, default_value):
+    """Safely convert a value to int with a default value if conversion fails"""
+    if isinstance(value, int):
+        return value
+    
+    if isinstance(value, (float, str)):
+        try:
+            return int(value)
+        except (ValueError, TypeError):
+            logger.warning(f"Failed to convert '{value}' to int. Using default: {default_value}")
+    
+    return default_value
+
 def main():
     """Main function"""
     # Parse command line arguments
@@ -168,7 +195,7 @@ def main():
             'test_size': config['data'].get('test_size', 0.2),
             'min_samples_per_class': config['data'].get('min_samples_per_class', 1000),
             # Add other necessary data configuration options
-            'batch_size': config['train'].get('batch_size', 64),
+            'batch_size': safe_int_convert(config['train'].get('batch_size', 64), 64),
             'memory_optimization': True
         }
     }
@@ -200,7 +227,7 @@ def main():
     logger.info(f"Using device: {device}")
 
     # Set random seed for reproducibility
-    seed = config.get('random_seed', 42)
+    seed = safe_int_convert(config.get('random_seed', 42), 42)
     torch.manual_seed(seed)
     np.random.seed(seed)
     if use_gpu:
@@ -233,14 +260,14 @@ def main():
         model_config = config.get('model', {})
         
         # Set default values for required parameters if not found in config
-        input_dim = model_config.get('input_dim', 128)  # Default input dimension
-        hidden_dim = model_config.get('hidden_dim', 64) 
-        out_dim = model_config.get('out_dim', 64)
-        time_dim = model_config.get('time_dim', 16)
-        num_layers = model_config.get('num_layers', 2)
-        num_heads = model_config.get('num_heads', 4)
-        dropout = model_config.get('dropout', 0.2)
-        num_classes = model_config.get('num_classes', 2)  # Default: binary classification
+        input_dim = safe_int_convert(model_config.get('input_dim', 128), 128)
+        hidden_dim = safe_int_convert(model_config.get('hidden_dim', 64), 64)
+        out_dim = safe_int_convert(model_config.get('out_dim', 64), 64)
+        time_dim = safe_int_convert(model_config.get('time_dim', 16), 16)
+        num_layers = safe_int_convert(model_config.get('num_layers', 2), 2)
+        num_heads = safe_int_convert(model_config.get('num_heads', 4), 4)
+        dropout = safe_float_convert(model_config.get('dropout', 0.2), 0.2)
+        num_classes = safe_int_convert(model_config.get('num_classes', 2), 2)
         
         logger.info(f"Model parameters: input_dim={input_dim}, hidden_dim={hidden_dim}, out_dim={out_dim}, "
                     f"num_classes={num_classes}, num_layers={num_layers}, num_heads={num_heads}")
@@ -270,18 +297,16 @@ def main():
         model.to(device)
         
         # Get and convert learning rate and weight decay parameters with proper type conversion
-        try:
-            learning_rate = float(config['train'].get('learning_rate', 0.001))  # Default if missing
-        except (ValueError, TypeError):
-            learning_rate = 0.001
-            logger.warning(f"Invalid learning_rate value in config, using default: {learning_rate}")
-            
-        try:
-            weight_decay = float(config['train'].get('weight_decay', 5e-5))  # Default if missing
-        except (ValueError, TypeError):
-            weight_decay = 5e-5
-            logger.warning(f"Invalid weight_decay value in config, using default: {weight_decay}")
-            
+        # Debug log raw values first
+        raw_lr = config['train'].get('learning_rate', 0.001)
+        raw_wd = config['train'].get('weight_decay', 5e-5)
+        logger.info(f"Raw values from config - learning_rate: {raw_lr} (type: {type(raw_lr).__name__}), weight_decay: {raw_wd} (type: {type(raw_wd).__name__})")
+        
+        learning_rate = safe_float_convert(raw_lr, 0.001)
+        weight_decay = safe_float_convert(raw_wd, 5e-5)
+        
+        logger.info(f"Converted values - learning_rate: {learning_rate}, weight_decay: {weight_decay}")
+        
         # Set up optimizer
         optimizer = torch.optim.Adam(
             model.parameters(),
@@ -300,12 +325,8 @@ def main():
         if mode == 'train':
             logger.info("Starting model training...")
             # Training logic...
-            epochs = config['train'].get('epochs', 10)  # Default if missing
-            try:
-                epochs = int(epochs)
-            except (ValueError, TypeError):
-                epochs = 10
-                logger.warning(f"Invalid epochs value in config, using default: {epochs}")
+            epochs = safe_int_convert(config['train'].get('epochs', 10), 10)
+            logger.info(f"Training for {epochs} epochs")
                 
             for epoch in range(epochs):
                 logger.info(f"Epoch {epoch+1}/{epochs}")
