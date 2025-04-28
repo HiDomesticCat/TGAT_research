@@ -54,7 +54,7 @@ model:
 # 訓練相關配置 - 效能優化設置
 train:
   learning_rate: 0.002            # 學習率
-  weight_decay: 5e-5              # 權重衰減
+  weight_decay: 0.00005          # 權重衰減 (科學記數法改為小數點形式)
   epochs: 50                      # 訓練輪數
   patience: 5                     # 早停耐心值
   batch_size: 1024                # 批次大小
