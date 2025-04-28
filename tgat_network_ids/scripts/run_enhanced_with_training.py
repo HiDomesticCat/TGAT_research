@@ -29,7 +29,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from src.data.optimized_data_loader import EnhancedMemoryOptimizedDataLoader as OptimizedDataLoader
 from src.data.optimized_graph_builder import OptimizedGraphBuilder
 from src.data.advanced_sampling import AdvancedGraphSampler
-from src.data.adaptive_window import AdaptiveTimeWindow
+from src.data.adaptive_window import AdaptiveWindowManager as AdaptiveTimeWindow
 from src.models.optimized_tgat_model import OptimizedTGATModel
 from src.models.training_engine import TrainingEngine
 from src.utils.memory_utils import track_memory_usage, log_memory_usage
