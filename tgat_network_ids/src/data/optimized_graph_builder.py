@@ -25,1002 +25,800 @@ import random
 from datetime import datetime
 import os
 import pickle
-import scipy.sparse as sp
+import scipy.sparse as sp # 僅在 use_sparse_representation 為 True 時實際使用
+from typing import Dict, List, Tuple, Set, Union, Optional, Any
 
-# 導入記憶體優化工具
-from ..utils.memory_utils import (
-    clean_memory, memory_usage_decorator, print_memory_usage,
-    get_memory_usage, print_optimization_suggestions
-)
+# 導入記憶體優化工具 (假設路徑正確)
+# 注意：導入路徑可能需要根據您的實際專案結構調整
+try:
+    # 嘗試使用相對導入
+    from ..utils.memory_utils import (
+        clean_memory, memory_usage_decorator, print_memory_usage,
+        get_memory_usage, print_optimization_suggestions
+    )
+except ImportError:
+     # 如果相對導入失敗，嘗試直接導入（可能在直接運行此文件時需要）
+     print("警告：圖建立器無法從相對路徑導入記憶體工具，嘗試直接導入。")
+     try:
+         # 假設 utils 目錄與 src 在同一層級或已添加到 PYTHONPATH
+         from utils.memory_utils import (
+             clean_memory, memory_usage_decorator, print_memory_usage,
+             get_memory_usage, print_optimization_suggestions
+         )
+     except ImportError as ie:
+          # 如果都失敗，定義虛設函數以允許程式碼運行
+          print(f"直接導入 memory_utils 失敗: {ie}。將使用虛設函數。")
+          def clean_memory(*args, **kwargs): pass
+          # 裝飾器返回原始函數
+          def memory_usage_decorator(func): return func
+          def print_memory_usage(*args, **kwargs): pass
+          def get_memory_usage(*args, **kwargs): return {}
+          def print_optimization_suggestions(*args, **kwargs): pass
 
+
+# 配置日誌記錄器
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 class OptimizedGraphBuilder:
-    """優化版動態網路圖結構類別"""
+    """優化版動態網路圖結構類別 (已修正)"""
 
-    def __init__(self, config, device='cuda'):
+    def __init__(self, config: Dict[str, Any], device: str = 'cpu'):
         """
         初始化優化版動態網路圖結構
 
         參數:
-            config (dict): 配置字典
-            device (str): 計算裝置 ('cpu' 或 'cuda')
+            config (dict): 配置字典，應包含 'graph' 子字典
+            device (str): 計算裝置 ('cpu' 或 'cuda:x')。注意：DGL圖主要在CPU管理。
         """
-        # 從配置中提取圖相關設置
+        # --- 配置讀取 ---
         graph_config = config.get('graph', {})
-        self.temporal_window = graph_config.get('temporal_window', 300)  # 5分鐘
-        self.use_subgraph_sampling = graph_config.get('use_subgraph_sampling', True)
-        self.max_nodes_per_subgraph = graph_config.get('max_nodes_per_subgraph', 5000)
-        self.max_edges_per_subgraph = graph_config.get('max_edges_per_subgraph', 10000)
-        self.use_sparse_representation = graph_config.get('use_sparse_representation', True)
-        self.edge_batch_size = graph_config.get('edge_batch_size', 5000)
-        self.prune_inactive_nodes = graph_config.get('prune_inactive_nodes', True)
-        self.inactive_threshold = graph_config.get('inactive_threshold', 1800)  # 30分鐘
+        self.temporal_window = float(graph_config.get('temporal_window', 300.0))  # 時間窗口大小 (秒)
+        self.use_sparse_representation = bool(graph_config.get('use_sparse_representation', False))
+        self.inactive_threshold = float(graph_config.get('inactive_threshold', 600.0)) # 節點不活躍閾值 (秒)
+        self.pruning_interval = float(graph_config.get('pruning_interval', 300.0)) # 節點清理間隔 (秒)
+        # self.edge_index_format = bool(graph_config.get('edge_index_format', False)) # 這個選項似乎未使用，可以考慮移除
+        self.use_subgraph_sampling = bool(graph_config.get('use_subgraph_sampling', False))
+        self.max_nodes_per_subgraph = int(graph_config.get('max_nodes_per_subgraph', 10000))
+        self.max_edges_per_subgraph = int(graph_config.get('max_edges_per_subgraph', 50000))
+        self.use_dgl_transform = bool(graph_config.get('use_dgl_transform', False))
+        self.cache_neighbor_sampling = bool(graph_config.get('cache_neighbor_sampling', False))
 
-        # 新增優化設定
-        self.use_block_sparse = graph_config.get('use_block_sparse', True)  # 使用分塊稀疏表示
-        self.block_size = graph_config.get('block_size', 128)  # 分塊大小
-        self.use_csr_format = graph_config.get('use_csr_format', True)  # 使用CSR格式
-        self.use_heterograph = graph_config.get('use_heterograph', False)  # 使用異構圖(適用於有多種節點類型)
-        self.use_dgl_transform = graph_config.get('use_dgl_transform', True)  # 使用DGL的transform API
-        self.cache_neighbor_sampling = graph_config.get('cache_neighbor_sampling', True)  # 緩存鄰居採樣結果
-        self.adaptive_pruning = graph_config.get('adaptive_pruning', True)  # 自適應清理策略
-        self.smart_memory_allocation = graph_config.get('smart_memory_allocation', True)  # 智能記憶體分配
-        self.edge_index_format = graph_config.get('edge_index_format', True)  # 使用邊索引格式(PyG風格)
+        # 設置設備（主要用於返回的子圖或 Tensor）
+        try:
+            self.device = torch.device(device)
+            logger.info(f"圖建立器數據輸出將使用裝置: {self.device}")
+        except Exception as e:
+             logger.error(f"無法識別的裝置 '{device}'，將使用 CPU。錯誤: {e}")
+             self.device = torch.device('cpu')
 
-        # 設置裝置
-        # 檢查 CUDA 是否可用
-        if device == 'cuda' and torch.cuda.is_available():
-            try:
-                # 嘗試初始化 CUDA
-                test_tensor = torch.zeros(1, device='cuda')
-                del test_tensor  # 釋放測試張量
-                self.device = device
-                logger.info(f"成功初始化 CUDA，使用 GPU 設備")
-            except Exception as e:
-                logger.warning(f"CUDA 初始化失敗，使用 CPU 代替: {str(e)}")
-                self.device = 'cpu'
-        else:
-            logger.info(f"CUDA 不可用，使用 CPU 設備")
-            self.device = 'cpu'
+        # --- 內部狀態初始化 ---
+        # DGL 圖物件 (始終在 CPU 上管理主要結構)
+        self.g: Optional[dgl.DGLGraph] = None
+        self.temporal_g: Optional[dgl.DGLGraph] = None # 時間窗口內的子圖
 
-        logger.info(f"最終使用裝置: {self.device}")
+        # 節點數據 (使用 *原始* ID 作為鍵)
+        self.node_features: Dict[Any, torch.Tensor] = {}
+        self.node_timestamps: Dict[Any, float] = {}
+        self.node_labels: Dict[Any, int] = {}
+        self.node_last_active: Dict[Any, float] = {}
+        self.node_importance: Dict[Any, float] = {} # (可選)
 
-        # 初始化圖結構
-        self.g = None  # 主圖
-        self.edge_index = None  # 邊索引(PyG格式)
-        self.node_features = {}  # 節點特徵
-        self.edge_timestamps = {}  # 邊的時間戳記
-        self.edge_features = {}  # 邊特徵
-        self.node_timestamps = {}  # 節點時間戳記
-        self.node_labels = {}  # 節點標籤
-        self.current_time = 0  # 當前時間
-        self.temporal_g = None  # 時間子圖
+        # 邊數據 (使用 *原始* ID 對 (src, dst) 作為鍵)
+        self.edge_features: Dict[Tuple[Any, Any], Any] = {} # 可以是 Tensor 或其他類型
+        self.edge_timestamps: Dict[Tuple[Any, Any], float] = {}
 
-        # 分塊稀疏表示
-        self.sparse_blocks = {}  # 分塊稀疏表示
+        # 索引與映射
+        self.existing_nodes: Set[Any] = set() # 儲存 *原始* 節點 ID
+        self.existing_edges: Set[Tuple[Any, Any]] = set() # 儲存 *原始* ID 對 (src, dst)
+        self.node_id_map: Dict[Any, int] = {} # 原始 ID -> DGL 內部連續 ID (0 to N-1)
+        self.reverse_node_id_map: Dict[int, Any] = {} # DGL 內部連續 ID -> 原始 ID
+        self.next_internal_id: int = 0 # 下一個可用的內部 ID
+
+        # 輔助映射 (使用 *原始* ID 作為鍵)
+        self.src_to_dst: Dict[Any, Set[Any]] = defaultdict(set)
+        self.dst_to_src: Dict[Any, Set[Any]] = defaultdict(set)
+
+        # 狀態變數
+        self.node_feat_dim: Optional[int] = None
+        self.edge_feat_dim: Optional[int] = None
+        self.current_time: float = 0.0 # 圖的當前邏輯時間 (由輸入數據的時間戳更新)
+        self.last_pruning_time: float = time.time() # 上次清理的系統時間戳
 
         # 鄰居採樣緩存
-        self.neighbor_cache = {}  # 鄰居採樣結果緩存
-        self.cache_hits = 0
-        self.cache_misses = 0
+        self.neighbor_cache: Dict[Tuple[Any, int], List[Any]] = {}
 
-        # 記錄已存在的節點和邊，用於快速查詢
-        self.existing_nodes = set()
-        self.existing_edges = set()
-
-        # 用於動態跟踪每個源IP到目標IP的連接
-        self.src_to_dst = defaultdict(set)
-        self.dst_to_src = defaultdict(set)
-
-        # 特徵維度
-        self.node_feat_dim = None
-        self.edge_feat_dim = None
-
-        # 記錄節點最後活躍時間，用於清理不活躍節點
-        self.node_last_active = {}
-
-        # 記錄節點重要性分數，用於自適應清理
-        self.node_importance = {}
-
-        # 記錄上次清理時間
-        self.last_pruning_time = time.time()
-
-        # 初始化一個空圖
+        # 初始化空圖
         self._init_graph()
 
-        logger.info(f"初始化優化版動態網路圖結構: 時間窗口={self.temporal_window}秒")
-        logger.info(f"子圖採樣設置: 啟用={self.use_subgraph_sampling}, 最大節點數={self.max_nodes_per_subgraph}")
-        logger.info(f"稀疏表示設置: 啟用={self.use_sparse_representation}, 分塊稀疏={self.use_block_sparse}")
-        logger.info(f"記憶體優化: 邊索引格式={self.edge_index_format}, 智能記憶體分配={self.smart_memory_allocation}")
+        logger.info("優化版圖建立器初始化完成")
 
     def _init_graph(self):
-        """初始化一個空圖 - 根據不同設定選擇最佳表示方法"""
-        if self.edge_index_format:
-            # 使用邊索引格式 (PyG風格)
-            self.edge_index = ([], [])  # (src_list, dst_list)
-
-            # 創建一個空的DGL圖，使用稀疏表示
-            self.g = dgl.graph(([], []),
-                              num_nodes=0,
-                              idtype=torch.int64,
-                              device='cpu')  # 初始在 CPU 上創建
-        elif self.use_heterograph:
-            # 使用異構圖 - 適用於有多種節點/邊類型
-            # 定義關係類型
-            graph_data = {
-                ('node', 'connects', 'node'): ([], [])
-            }
-            self.g = dgl.heterograph(graph_data)
-        else:
-            # 使用標準DGL圖
-            self.g = dgl.graph(([], []),  # 源節點、目標節點
-                              num_nodes=0,
-                              idtype=torch.int64,
-                              device='cpu')  # 初始在 CPU 上創建
-
-        # 初始化稀疏塊
-        if self.use_block_sparse:
-            self.sparse_blocks = {
-                'rows': [],
-                'cols': [],
-                'blocks': {}
-            }
-
-        logger.info("初始化空圖 - 使用優化格式")
+        """初始化或重置為空圖"""
+        # 圖結構始終在 CPU 上創建和管理
+        self.g = dgl.graph(([], []), num_nodes=0, idtype=torch.int64, device='cpu')
+        self.temporal_g = None # 重置時間子圖
+        # 清空所有數據字典和映射
+        self.node_features.clear()
+        self.node_timestamps.clear()
+        self.node_labels.clear()
+        self.node_last_active.clear()
+        self.node_importance.clear()
+        self.edge_features.clear()
+        self.edge_timestamps.clear()
+        self.existing_nodes.clear()
+        self.existing_edges.clear()
+        self.node_id_map.clear()
+        self.reverse_node_id_map.clear()
+        self.next_internal_id = 0
+        self.src_to_dst.clear()
+        self.dst_to_src.clear()
+        self.neighbor_cache.clear()
+        gc.collect() # 執行垃圾回收
+        logger.info("已初始化空圖和所有相關數據結構")
 
     @memory_usage_decorator
-    def add_nodes(self, node_ids, features, timestamps, labels=None):
+    def add_nodes(self, node_ids: List[Any], features: Optional[Union[np.ndarray, torch.Tensor]] = None,
+                  timestamps: Optional[List[float]] = None, labels: Optional[List[int]] = None):
         """
-        添加節點到圖 - 使用智能記憶體管理
+        添加節點到圖 - 使用節點 ID 映射 (修正版)
 
         參數:
-            node_ids (list): 節點ID列表
-            features (np.ndarray): 節點特徵矩陣 [n_nodes, feat_dim]
-            timestamps (list): 節點時間戳記列表
-            labels (list, optional): 節點標籤列表
+            node_ids: 節點 ID 列表 (原始 ID, 可以是任何可哈希類型)
+            features: 節點特徵 (Numpy array 或 Tensor, [num_nodes, feat_dim])
+            timestamps: 節點時間戳列表 (對應 node_ids)
+            labels: 節點標籤列表 (對應 node_ids, 可選)
         """
-        # 設置節點特徵維度 (首次添加時)
-        if self.node_feat_dim is None and features is not None:
-            self.node_feat_dim = features.shape[1]
+        if not node_ids:
+            logger.debug("add_nodes: 收到空的 node_ids 列表，不執行任何操作。")
+            return
 
-        # 轉換為張量 - 優化記憶體使用
-        if isinstance(features, np.ndarray):
-            if self.smart_memory_allocation and features.dtype == np.float64:
-                # 降低精度以節省記憶體 - 對特徵使用float32足夠
+        num_input_nodes = len(node_ids)
+
+        # --- 處理特徵 ---
+        if features is not None:
+            # 設置或驗證特徵維度
+            if self.node_feat_dim is None and len(features) > 0:
+                 if hasattr(features, 'shape') and len(features.shape) > 1:
+                     self.node_feat_dim = features.shape[1]
+                     logger.info(f"檢測到節點特徵維度: {self.node_feat_dim}")
+                 else:
+                      self.node_feat_dim = 1 # 標量特徵
+                      logger.info("檢測到標量節點特徵，維度設為 1。")
+
+            # 確保特徵是 Tensor
+            if isinstance(features, np.ndarray):
                 features = torch.tensor(features, dtype=torch.float32)
-            else:
-                features = torch.FloatTensor(features)
-
-        # 獲取新節點 (排除已存在的)
-        new_nodes = [nid for nid in node_ids if nid not in self.existing_nodes]
-
-        if not new_nodes:
-            return
-
-        # 更新圖的節點數
-        current_num_nodes = self.g.num_nodes()
-        new_num_nodes = current_num_nodes + len(new_nodes)
-        self.g.add_nodes(len(new_nodes))
-
-        # 更新節點特徵字典 - 高效率版本
-        node_idx_map = {nid: i + current_num_nodes for i, nid in enumerate(new_nodes)}
-
-        # 直接批量更新而非逐個處理
-        for i, nid in enumerate(new_nodes):
-            idx = node_idx_map[nid]
-            self.node_features[nid] = features[i]
-            self.node_timestamps[nid] = timestamps[i]
-            self.node_last_active[nid] = time.time()  # 記錄當前時間作為最後活躍時間
-
-            # 初始化節點重要性分數 - 用於自適應清理
-            if self.adaptive_pruning:
-                self.node_importance[nid] = 1.0  # 初始重要性分數
-
-            if labels is not None:
-                if isinstance(labels, pd.Series):
-                    # 如果是 Series，通過位置訪問而非索引
-                    self.node_labels[nid] = labels.iloc[i] if i < len(labels) else -1
-                else:
-                    # 如果是數組或列表，直接索引
-                    self.node_labels[nid] = labels[i] if i < len(labels) else -1
-            self.existing_nodes.add(nid)
-
-        # 更新當前時間為最新的時間戳記
-        if timestamps:
-            self.current_time = max(self.current_time, max(timestamps))
-
-        logger.info(f"添加 {len(new_nodes)} 個新節點，當前共 {new_num_nodes} 個節點")
-
-        # 智能定期清理不活躍節點
-        if self.prune_inactive_nodes:
-            current_time = time.time()
-            # 根據圖大小和最後清理時間自適應調整清理頻率
-            pruning_interval = self._get_adaptive_pruning_interval()
-            if current_time - self.last_pruning_time > pruning_interval:
-                self._prune_inactive_nodes()
-
-    def _get_adaptive_pruning_interval(self):
-        """智能調整清理間隔 - 根據圖大小和記憶體使用情況"""
-        # 基礎間隔
-        base_interval = 300  # 5分鐘
-
-        if not self.adaptive_pruning:
-            return base_interval
-
-        # 根據節點數量調整
-        node_factor = min(3.0, max(0.5, len(self.existing_nodes) / 10000))
-
-        # 根據記憶體使用調整
-        mem_info = get_memory_usage()
-        mem_percent = mem_info['system_memory_percent']
-        mem_factor = 1.0
-
-        # 記憶體使用率高時，更頻繁地清理
-        if mem_percent > 80:
-            mem_factor = 0.5
-        elif mem_percent < 50:
-            mem_factor = 2.0
-
-        # 計算最終間隔
-        interval = base_interval * node_factor * mem_factor
-
-        return interval
-
-    def _prune_inactive_nodes(self):
-        """高效清理不活躍節點 - 使用重要性評分"""
-        if not self.prune_inactive_nodes:
-            return
-
-        # 檢查上次清理時間，避免頻繁清理
-        current_time = time.time()
-        if current_time - self.last_pruning_time < 600:  # 至少10分鐘才清理一次
-            return
-
-        # 找出不活躍節點
-        inactive_nodes = []
-        for nid, last_active in self.node_last_active.items():
-            inactive_time = current_time - last_active
-
-            # 使用自適應重要性閾值
-            if self.adaptive_pruning:
-                # 重要性高的節點可以存活更長時間
-                importance = self.node_importance.get(nid, 1.0)
-                threshold = self.inactive_threshold * importance
-                if inactive_time > threshold:
-                    inactive_nodes.append(nid)
-            else:
-                # 標準清理方式
-                if inactive_time > self.inactive_threshold:
-                    inactive_nodes.append(nid)
-
-        # 如果沒有不活躍節點或不活躍節點比例過低，不清理
-        inactive_ratio = len(inactive_nodes) / max(1, len(self.existing_nodes))
-        if not inactive_nodes or inactive_ratio < 0.1:  # 不活躍節點少於10%時不清理
-            self.last_pruning_time = current_time  # 仍更新清理時間
-            return
-
-        logger.info(f"清理 {len(inactive_nodes)} 個不活躍節點 (佔比 {inactive_ratio:.1%})")
-
-        # 獲取活躍節點集合
-        active_nodes = list(self.existing_nodes - set(inactive_nodes))
-        active_nodes_set = set(active_nodes)
-
-        # 檢查活躍邊 - 只保留連接兩個活躍節點的邊
-        active_edges = []
-        for src, dst in self.existing_edges:
-            if src in active_nodes_set and dst in active_nodes_set:
-                active_edges.append((src, dst))
-
-        # 建立高效的節點ID映射 - 使用連續的整數索引
-        node_map = {old_id: new_id for new_id, old_id in enumerate(active_nodes)}
-
-        # 使用DGL的高效API建立新圖
-        if self.edge_index_format:
-            # 使用邊索引格式
-            if active_edges:
-                new_src = [node_map[e[0]] for e in active_edges]
-                new_dst = [node_map[e[1]] for e in active_edges]
-                self.edge_index = (new_src, new_dst)
-            else:
-                self.edge_index = ([], [])
-
-            # 創建新圖
-            new_g = dgl.graph((self.edge_index[0], self.edge_index[1]),
-                            num_nodes=len(active_nodes),
-                            idtype=torch.int64,
-                            device='cpu')
+            elif not isinstance(features, torch.Tensor):
+                 logger.error(f"預期的特徵類型是 numpy.ndarray 或 torch.Tensor，但收到 {type(features)}")
+                 features = None # 無法處理，設為 None
+             # 維度檢查
+            if features is not None:
+                 if features.shape[0] != num_input_nodes:
+                      logger.error(f"節點 ID 數量 ({num_input_nodes}) 與特徵數量 ({features.shape[0]}) 不匹配！將忽略特徵。")
+                      features = None
+                 elif self.node_feat_dim is not None and features.shape[1] != self.node_feat_dim:
+                      logger.error(f"輸入特徵維度 ({features.shape[1]}) 與現有維度 ({self.node_feat_dim}) 不匹配！將忽略特徵。")
+                      features = None
         else:
-            # 使用標準DGL API
-            if active_edges:
-                # 將原始節點ID映射到新的連續節點ID
-                new_src = [node_map[e[0]] for e in active_edges]
-                new_dst = [node_map[e[1]] for e in active_edges]
+             logger.debug("add_nodes: 未提供節點特徵。")
 
-                # 批量添加邊 - 使用DGL高效API
-                if len(new_src) > 0:
-                    # 創建新圖並一次性添加所有邊
-                    new_g = dgl.graph((new_src, new_dst),
-                                    num_nodes=len(active_nodes),
-                                    idtype=torch.int64,
-                                    device='cpu')
-                else:
-                    # 如果沒有邊，創建空圖
-                    new_g = dgl.graph(([], []),
-                                    num_nodes=len(active_nodes),
-                                    idtype=torch.int64,
-                                    device='cpu')
-            else:
-                # 如果沒有邊，創建空圖
-                new_g = dgl.graph(([], []),
-                                num_nodes=len(active_nodes),
-                                idtype=torch.int64,
-                                device='cpu')
+        # --- 處理時間戳 ---
+        if timestamps is None:
+             current_sys_time_float = time.time()
+             timestamps = [current_sys_time_float] * num_input_nodes
+             logger.debug(f"add_nodes: 未提供時間戳，使用當前系統時間 {current_sys_time_float}")
+        elif len(timestamps) != num_input_nodes:
+             logger.error(f"節點 ID 數量 ({num_input_nodes}) 與時間戳數量 ({len(timestamps)}) 不匹配！將忽略時間戳。")
+             timestamps = [time.time()] * num_input_nodes # 回退到系統時間
 
-        # 高效更新節點特徵和相關數據 - 使用向量化操作而非逐個處理
-        new_node_features = {}
-        new_node_timestamps = {}
-        new_node_labels = {}
-        new_node_last_active = {}
-        new_node_importance = {}
-        new_edge_features = {}
-        new_edge_timestamps = {}
-        new_existing_edges = set()
+        # --- 處理標籤 ---
+        if labels is not None and len(labels) != num_input_nodes:
+             logger.error(f"節點 ID 數量 ({num_input_nodes}) 與標籤數量 ({len(labels)}) 不匹配！將忽略標籤。")
+             labels = None
 
-        # 節點數據轉換 - 批量處理
-        for old_id in active_nodes:
-            new_id = node_map[old_id]
-            if old_id in self.node_features:
-                new_node_features[new_id] = self.node_features[old_id]
-            if old_id in self.node_timestamps:
-                new_node_timestamps[new_id] = self.node_timestamps[old_id]
-            if old_id in self.node_labels:
-                new_node_labels[new_id] = self.node_labels[old_id]
-            if old_id in self.node_last_active:
-                new_node_last_active[new_id] = self.node_last_active[old_id]
-            if self.adaptive_pruning and old_id in self.node_importance:
-                # 提升保留下來的節點的重要性
-                new_node_importance[new_id] = self.node_importance[old_id] * 1.2
+        # --- 找出需要添加到 DGL 圖的新節點並更新數據 ---
+        new_dgl_nodes_count = 0
+        current_sys_time = time.time() # 用於記錄活躍時間
+        max_timestamp_in_batch = 0.0
 
-        # 邊數據轉換 - 使用映射表加速
-        edge_map = {}
-        for i, (old_src, old_dst) in enumerate(active_edges):
-            new_src = node_map[old_src]
-            new_dst = node_map[old_dst]
-            new_edge = (new_src, new_dst)
-            old_edge = (old_src, old_dst)
-            edge_map[old_edge] = new_edge
+        for i, nid in enumerate(node_ids):
+            # 檢查節點是否已在映射中
+            if nid not in self.node_id_map:
+                internal_id = self.next_internal_id
+                self.node_id_map[nid] = internal_id
+                self.reverse_node_id_map[internal_id] = nid
+                self.next_internal_id += 1
+                new_dgl_nodes_count += 1
+                self.existing_nodes.add(nid) # 添加到原始 ID 集合
 
-            if old_edge in self.edge_features:
-                new_edge_features[new_edge] = self.edge_features[old_edge]
-            if old_edge in self.edge_timestamps:
-                new_edge_timestamps[new_edge] = self.edge_timestamps[old_edge]
+            # 更新節點數據 (使用原始 ID 作為鍵)
+            current_timestamp = float(timestamps[i]) # 確保是浮點數
+            max_timestamp_in_batch = max(max_timestamp_in_batch, current_timestamp)
+            if features is not None: self.node_features[nid] = features[i]
+            self.node_timestamps[nid] = current_timestamp
+            if labels is not None: self.node_labels[nid] = int(labels[i]) # 確保是整數
+            self.node_last_active[nid] = current_sys_time # 更新活躍時間
 
-            new_existing_edges.add(new_edge)
+        # --- 添加新節點到 DGL 圖結構 ---
+        if new_dgl_nodes_count > 0:
+            self.g = dgl.add_nodes(self.g, new_dgl_nodes_count) # 在 CPU 上添加
+            logger.info(f"添加 {new_dgl_nodes_count} 個新節點到 DGL 圖，總內部節點數: {self.g.num_nodes()}")
+            # 驗證計數器是否匹配
+            if self.g.num_nodes() != self.next_internal_id:
+                 logger.critical(f"內部 ID 計數器 ({self.next_internal_id}) 與 DGL 圖節點數 ({self.g.num_nodes()}) 不匹配！映射可能已損壞。")
 
-        # 批量更新所有數據結構
+        # 更新圖的當前邏輯時間
+        self.current_time = max(self.current_time, max_timestamp_in_batch)
+
+        # --- 執行節點清理（如果達到間隔）---
+        if current_sys_time - self.last_pruning_time > self.pruning_interval:
+            self._prune_inactive_nodes()
+
+    @memory_usage_decorator
+    def _prune_inactive_nodes(self):
+        """高效清理不活躍節點 - 更新映射 (修正版)"""
+        if not self.existing_nodes: return # 沒有節點
+
+        current_sys_time = time.time()
+        inactive_original_nodes = {
+            nid for nid, last_active in self.node_last_active.items()
+            if current_sys_time - last_active > self.inactive_threshold
+        }
+
+        num_inactive = len(inactive_original_nodes)
+        if num_inactive == 0:
+            self.last_pruning_time = current_sys_time # 即使沒有清理，也更新時間戳
+            logger.debug("無需清理節點。")
+            return
+
+        logger.info(f"檢測到 {num_inactive} 個不活躍節點，開始清理...")
+        start_prune_time = time.time()
+
+        # --- 獲取活躍節點的 *原始* ID ---
+        active_original_nodes = sorted(list(self.existing_nodes - inactive_original_nodes)) # 排序以保證映射穩定性
+        num_active_nodes = len(active_original_nodes)
+        logger.info(f"清理後預計剩餘 {num_active_nodes} 個活躍節點。")
+
+        if num_active_nodes == 0:
+             logger.info("所有節點均不活躍，重置圖。")
+             self._init_graph()
+             self.last_pruning_time = current_sys_time
+             return
+
+        # --- 建立新的映射 (只包含活躍節點) ---
+        new_node_id_map = {old_id: new_internal_id for new_internal_id, old_id in enumerate(active_original_nodes)}
+        new_reverse_node_id_map = {v: k for k, v in new_node_id_map.items()}
+        new_next_internal_id = num_active_nodes
+
+        # --- 遍歷現有邊，篩選活躍邊並獲取 *新* 內部索引 ---
+        new_src_indices = []
+        new_dst_indices = []
+        active_edge_original_keys = set() # 保存活躍邊的原始鍵
+
+        # 直接迭代集合可能更高效
+        for src_orig, dst_orig in self.existing_edges:
+            if src_orig in new_node_id_map and dst_orig in new_node_id_map:
+                new_src_idx = new_node_id_map[src_orig]
+                new_dst_idx = new_node_id_map[dst_orig]
+                new_src_indices.append(new_src_idx)
+                new_dst_indices.append(new_dst_idx)
+                active_edge_original_keys.add((src_orig, dst_orig))
+
+        num_active_edges = len(active_edge_original_keys)
+        logger.info(f"清理後預計剩餘 {num_active_edges} 條邊。")
+
+        # --- 創建新的 DGL 圖 (使用新的內部索引) ---
+        logger.debug("創建新的 DGL 圖結構...")
+        new_g = dgl.graph((new_src_indices, new_dst_indices),
+                          num_nodes=new_next_internal_id,
+                          idtype=torch.int64,
+                          device='cpu') # 始終在 CPU 創建
+
+        # --- 更新節點相關數據字典 (只保留活躍節點) ---
+        logger.debug("更新節點數據字典...")
+        self.node_features = {nid: feat for nid, feat in self.node_features.items() if nid in new_node_id_map}
+        self.node_timestamps = {nid: ts for nid, ts in self.node_timestamps.items() if nid in new_node_id_map}
+        self.node_labels = {nid: label for nid, label in self.node_labels.items() if nid in new_node_id_map}
+        self.node_last_active = {nid: ts for nid, ts in self.node_last_active.items() if nid in new_node_id_map}
+        if hasattr(self, 'node_importance'):
+             self.node_importance = {nid: score for nid, score in self.node_importance.items() if nid in new_node_id_map}
+
+        # --- 更新邊相關數據字典 (只保留活躍邊) ---
+        logger.debug("更新邊數據字典...")
+        self.edge_timestamps = {key: ts for key, ts in self.edge_timestamps.items() if key in active_edge_original_keys}
+        self.edge_features = {key: feat for key, feat in self.edge_features.items() if key in active_edge_original_keys}
+
+        # --- 更新內部狀態 ---
+        logger.debug("更新圖建立器內部狀態...")
         self.g = new_g
-        self.node_features = new_node_features
-        self.node_timestamps = new_node_timestamps
-        self.node_labels = new_node_labels
-        self.node_last_active = new_node_last_active
-        self.edge_features = new_edge_features
-        self.edge_timestamps = new_edge_timestamps
-        self.existing_edges = new_existing_edges
-        self.existing_nodes = set(range(len(active_nodes)))  # 使用連續索引
-        if self.adaptive_pruning:
-            self.node_importance = new_node_importance
+        self.existing_nodes = set(active_original_nodes) # 更新活躍原始 ID 集合
+        self.existing_edges = active_edge_original_keys # 更新活躍原始邊集合
+        self.node_id_map = new_node_id_map # 更新映射
+        self.reverse_node_id_map = new_reverse_node_id_map # 更新反向映射
+        self.next_internal_id = new_next_internal_id # 更新下一個內部 ID
 
-        # 高效重建源到目標的映射 - 使用defaultdict減少檢查
+        # --- 重建輔助映射 (src_to_dst, dst_to_src) ---
+        logger.debug("重建輔助映射...")
         self.src_to_dst = defaultdict(set)
         self.dst_to_src = defaultdict(set)
-
-        # 一次遍歷處理所有新邊
-        for (src, dst) in self.existing_edges:
+        for src, dst in self.existing_edges:
             self.src_to_dst[src].add(dst)
             self.dst_to_src[dst].add(src)
 
-        # 清空鄰居緩存
-        if self.cache_neighbor_sampling:
-            self.neighbor_cache = {}
+        # --- 清理緩存和記憶體 ---
+        self.neighbor_cache.clear()
+        self.last_pruning_time = current_sys_time
+        clean_memory(aggressive=True)
+        end_prune_time = time.time()
+        logger.info(f"節點清理完成，耗時 {end_prune_time - start_prune_time:.2f} 秒。")
+        logger.info(f"清理後 DGL 圖: {self.g.num_nodes()} 個內部節點, {self.g.num_edges()} 條邊")
+        print_memory_usage()
 
-        # 更新最後清理時間
-        self.last_pruning_time = current_time
-
-        # 清理記憶體
-        clean_memory()
-
-        logger.info(f"清理完成，當前共 {len(self.existing_nodes)} 個節點，{len(self.existing_edges)} 條邊")
 
     @memory_usage_decorator
-    def add_edges(self, src_nodes, dst_nodes, timestamps, edge_feats=None):
+    def add_edges(self, src_nodes: List[Any], dst_nodes: List[Any],
+                  timestamps: List[float], edge_feats: Optional[Union[np.ndarray, torch.Tensor, List]] = None):
         """
-        添加邊到圖 - 使用高效批量操作
+        添加邊到圖 - 使用節點 ID 映射 (修正版)
 
         參數:
-            src_nodes (list): 源節點ID列表
-            dst_nodes (list): 目標節點ID列表
-            timestamps (list): 邊的時間戳記列表
-            edge_feats (list, optional): 邊特徵列表 [n_edges, feat_dim]
+            src_nodes: 源節點 ID 列表 (原始 ID)
+            dst_nodes: 目標節點 ID 列表 (原始 ID)
+            timestamps: 邊的時間戳列表 (對應邊)
+            edge_feats: 邊的特徵 (Numpy array, Tensor 或列表, 可選)
         """
-        if len(src_nodes) != len(dst_nodes) or len(src_nodes) != len(timestamps):
-            raise ValueError("源節點、目標節點和時間戳記列表長度必須相同")
-
         if not src_nodes:
+            logger.debug("add_edges: 收到空的 src_nodes 列表，不執行任何操作。")
             return
 
-        # 設置邊特徵維度 (首次添加時)
-        if self.edge_feat_dim is None and edge_feats is not None:
-            self.edge_feat_dim = len(edge_feats[0])
+        num_input_edges = len(src_nodes)
+        # --- 驗證輸入長度 ---
+        if not (num_input_edges == len(dst_nodes) == len(timestamps)):
+            raise ValueError(f"輸入列表長度必須相同: src={len(src_nodes)}, dst={len(dst_nodes)}, time={len(timestamps)}")
+        if edge_feats is not None and len(edge_feats) != num_input_edges:
+            raise ValueError(f"邊特徵數量 ({len(edge_feats)}) 與邊數量 ({num_input_edges}) 不匹配")
 
-        # 批量獲取新邊 - 避免逐個處理
-        new_edges_info = [(i, src, dst) for i, (src, dst) in enumerate(zip(src_nodes, dst_nodes))
-                         if (src, dst) not in self.existing_edges and src in self.existing_nodes and dst in self.existing_nodes]
-
-        if not new_edges_info:
-            return
-
-        # 拆分信息
-        indices, new_src, new_dst = zip(*new_edges_info)
-        new_timestamps = [timestamps[i] for i in indices]
-
+        # --- 處理邊特徵 ---
+        edge_feats_tensor: Optional[torch.Tensor] = None
         if edge_feats is not None:
-            new_edge_feats = [edge_feats[i] for i in indices]
-        else:
-            new_edge_feats = None
-
-        # 更新節點最後活躍時間 - 批量更新
-        current_time = time.time()
-        for src, dst in zip(new_src, new_dst):
-            self.node_last_active[src] = current_time
-            self.node_last_active[dst] = current_time
-
-            # 更新節點重要性 - 連接度高的節點更重要
-            if self.adaptive_pruning:
-                self.node_importance[src] = min(10.0, self.node_importance.get(src, 1.0) + 0.1)
-                self.node_importance[dst] = min(10.0, self.node_importance.get(dst, 1.0) + 0.1)
-
-        # 獲取節點的圖索引 - 使用連續索引加速
-        if self.edge_index_format:
-            # 使用邊索引格式時，直接添加到邊索引
-            curr_src, curr_dst = self.edge_index
-            curr_src = list(curr_src) + list(new_src)
-            curr_dst = list(curr_dst) + list(new_dst)
-            self.edge_index = (curr_src, curr_dst)
-
-            # 更新DGL圖
-            self.g = dgl.graph((curr_src, curr_dst),
-                             num_nodes=self.g.num_nodes(),
-                             idtype=torch.int64,
-                             device='cpu')
-        else:
-            # 標準DGL格式
-            # 將節點ID轉換為連續索引
-            src_indices = []
-            dst_indices = []
-
-            # 如果使用了連續索引，直接使用節點ID
-            if isinstance(next(iter(self.existing_nodes), 0), int) and max(self.existing_nodes, default=0) < self.g.num_nodes():
-                src_indices = list(new_src)
-                dst_indices = list(new_dst)
-            else:
-                # 需要查找索引
-                node_idx_map = {nid: i for i, nid in enumerate(self.existing_nodes)}
-                for src, dst in zip(new_src, new_dst):
-                    src_indices.append(node_idx_map[src])
-                    dst_indices.append(node_idx_map[dst])
-
-            # 批量添加新邊到圖 - 使用DGL高效API
-            self.g.add_edges(src_indices, dst_indices)
-
-        # 更新邊特徵和時間戳記 - 使用字典批量更新
-        edge_updates = {}
-        timestamp_updates = {}
-
-        for i, edge_key in enumerate(zip(new_src, new_dst)):
-            edge_updates[edge_key] = new_edge_feats[i] if new_edge_feats else None
-            timestamp_updates[edge_key] = new_timestamps[i]
-            self.existing_edges.add(edge_key)
-
-            # 更新來源到目標的映射
-            src, dst = edge_key
-            self.src_to_dst[src].add(dst)
-            self.dst_to_src[dst].add(src)
-
-        # 批量更新特徵和時間戳
-        if new_edge_feats:
-            self.edge_features.update(edge_updates)
-        self.edge_timestamps.update(timestamp_updates)
-
-        # 更新當前時間為最新的時間戳記
-        if new_timestamps:
-            self.current_time = max(self.current_time, max(new_timestamps))
-
-        # 清空鄰居緩存 - 因為新添加的邊可能會改變採樣結果
-        if self.cache_neighbor_sampling:
-            self.neighbor_cache = {}
-
-        logger.info(f"添加 {len(new_src)} 條新邊，當前共 {self.g.num_edges()} 條邊")
-
-    @memory_usage_decorator
-    def add_edges_in_batches(self, src_nodes, dst_nodes, timestamps, edge_feats=None, batch_size=None):
-        """
-        批量添加邊到圖 - 智能批次處理
-
-        參數:
-            src_nodes (list): 源節點ID列表
-            dst_nodes (list): 目標節點ID列表
-            timestamps (list): 邊的時間戳記列表
-            edge_feats (list, optional): 邊特徵列表
-            batch_size (int, optional): 每批添加的邊數量
-        """
-        if len(src_nodes) != len(dst_nodes) or len(src_nodes) != len(timestamps):
-            raise ValueError("源節點、目標節點和時間戳記列表長度必須相同")
-
-        if not src_nodes:
-            return
-
-        # 智能批次大小選擇 - 根據記憶體使用情況調整
-        if batch_size is None:
-            mem_info = get_memory_usage()
-            mem_percent = mem_info.get('system_memory_percent', 0)
-
-            # 根據記憶體使用率動態調整批次大小
-            if mem_percent > 85:
-                # 記憶體使用率高，使用小批次
-                batch_size = min(1000, self.edge_batch_size // 5)
-            elif mem_percent > 70:
-                # 記憶體使用率中等，適當減小批次
-                batch_size = min(2000, self.edge_batch_size // 2)
-            else:
-                # 記憶體充足，使用標準批次大小
-                batch_size = self.edge_batch_size
-
-            logger.info(f"根據記憶體使用率({mem_percent:.1f}%)動態調整批次大小為: {batch_size}")
-
-        # 預先過濾無效邊，避免在批次循環中重複檢查
-        valid_edges = []
-        for i, (src, dst) in enumerate(zip(src_nodes, dst_nodes)):
-            if src in self.existing_nodes and dst in self.existing_nodes:
-                valid_edges.append((i, src, dst))
-
-        if not valid_edges:
-            logger.info("沒有有效的邊需要添加")
-            return
-
-        # 從有效邊中提取信息
-        valid_indices, filtered_src, filtered_dst = zip(*valid_edges)
-        filtered_timestamps = [timestamps[i] for i in valid_indices]
-
-        if edge_feats is not None:
-            filtered_edge_feats = [edge_feats[i] for i in valid_indices]
-        else:
-            filtered_edge_feats = None
-
-        
-        # 計算批次數量
-        total_edges = len(filtered_src)
-        num_batches = (total_edges + batch_size - 1) // batch_size
-
-        logger.info(f"批量添加 {total_edges} 條有效邊，分為 {num_batches} 批次處理")
-
-        # 分批次處理邊
-        for batch_idx in range(num_batches):
-            start_idx = batch_idx * batch_size
-            end_idx = min((batch_idx + 1) * batch_size, total_edges)
-
-            # 獲取當前批次
-            batch_src = filtered_src[start_idx:end_idx]
-            batch_dst = filtered_dst[start_idx:end_idx]
-            batch_timestamps = filtered_timestamps[start_idx:end_idx]
-
-            if filtered_edge_feats is not None:
-                batch_edge_feats = filtered_edge_feats[start_idx:end_idx]
-            else:
-                batch_edge_feats = None
-
-            # 添加當前批次的邊
-            self.add_edges(batch_src, batch_dst, batch_timestamps, batch_edge_feats)
-
-            # 每隔幾個批次清理一次記憶體
-            if (batch_idx + 1) % 5 == 0:
-                clean_memory()
-                logger.info(f"已處理 {min(end_idx, total_edges)}/{total_edges} 條邊")
-
-        logger.info(f"批量添加邊完成")
-
-    @memory_usage_decorator
-    def update_temporal_graph(self, current_time=None):
-        """
-        更新時間圖 (優化版) - 使用高效稀疏表示和採樣技術
-
-        參數:
-            current_time (float, optional): 當前時間戳記，預設使用最新時間
-        """
-        if current_time is not None:
-            self.current_time = current_time
-
-        # 計算時間窗口的起始時間
-        start_time = self.current_time - self.temporal_window
-
-        # 使用高效的子圖構建技術
-        if self.cache_neighbor_sampling and f"{start_time}_{self.current_time}" in self.neighbor_cache:
-            # 使用緩存的結果
-            self.cache_hits += 1
-            logger.info(f"使用緩存的時間子圖 ({start_time} 到 {self.current_time}) 緩存命中率: {self.cache_hits/(self.cache_hits+self.cache_misses):.2f}")
-            self.temporal_g = self.neighbor_cache[f"{start_time}_{self.current_time}"]
-            return self.temporal_g
-        else:
-            self.cache_misses += 1
-
-        # 過濾時間窗口內的邊 - 使用向量化操作加速
-        temporal_src = []
-        temporal_dst = []
-        temporal_edge_feats = []
-        temporal_edge_times = []
-
-        # 獲取節點列表
-        node_list = sorted(list(self.existing_nodes))
-        node_set = set(node_list)  # 快速查找用的集合
-
-        # 高效採樣 - 如果啟用子圖採樣且節點數量超過限制
-        if self.use_subgraph_sampling and len(node_list) > self.max_nodes_per_subgraph:
-            # 使用度數加權採樣而非簡單隨機採樣 - 保留高連接度節點
-            if self.adaptive_pruning:
-                # 計算節點權重 - 根據連接度和重要性
-                node_weights = {}
-                for nid in node_list:
-                    in_degree = len(self.dst_to_src.get(nid, set()))
-                    out_degree = len(self.src_to_dst.get(nid, set()))
-                    total_degree = in_degree + out_degree
-                    importance = self.node_importance.get(nid, 1.0)
-                    node_weights[nid] = total_degree * importance
-
-                # 根據權重進行採樣
-                if sum(node_weights.values()) > 0:
-                    sampled_nodes = random.choices(
-                        node_list,
-                        weights=[node_weights.get(nid, 1.0) for nid in node_list],
-                        k=min(self.max_nodes_per_subgraph, len(node_list))
-                    )
-                    # 去除可能的重複
-                    node_list = list(set(sampled_nodes))
+            # 設置或驗證邊特徵維度
+            if self.edge_feat_dim is None and len(edge_feats) > 0:
+                feat_example = edge_feats[0]
+                # 處理 Tensor 或 Numpy 數組的情況
+                if hasattr(feat_example, 'shape') and len(getattr(feat_example, 'shape', ())) > 0:
+                     self.edge_feat_dim = feat_example.shape[0]
+                # 處理列表或純量的情況
+                elif hasattr(feat_example, '__len__'):
+                     self.edge_feat_dim = len(feat_example)
                 else:
-                    node_list = random.sample(node_list, self.max_nodes_per_subgraph)
+                     self.edge_feat_dim = 1 # 標量
+                logger.info(f"檢測到邊特徵維度: {self.edge_feat_dim}")
+
+            # 確保是 Tensor
+            if isinstance(edge_feats, np.ndarray):
+                edge_feats_tensor = torch.tensor(edge_feats, dtype=torch.float32)
+            elif isinstance(edge_feats, list):
+                 try:
+                     edge_feats_tensor = torch.tensor(edge_feats, dtype=torch.float32)
+                 except Exception as e:
+                      logger.error(f"無法將列表轉換為邊特徵 Tensor: {e}。將忽略邊特徵。")
+                      edge_feats = None # 重置為 None
+            elif isinstance(edge_feats, torch.Tensor):
+                 edge_feats_tensor = edge_feats.float() # 確保是 float32
             else:
-                # 簡單隨機採樣
-                node_list = random.sample(node_list, self.max_nodes_per_subgraph)
+                 logger.error(f"不支持的邊特徵類型: {type(edge_feats)}。將忽略邊特徵。")
+                 edge_feats = None
 
-            node_set = set(node_list)  # 更新節點集合
-            logger.info(f"節點數量 {len(self.existing_nodes)} 超過限制 {self.max_nodes_per_subgraph}, 採樣後剩餘 {len(node_list)} 個節點")
+            # 維度檢查
+            if edge_feats_tensor is not None:
+                 if edge_feats_tensor.shape[0] != num_input_edges:
+                      logger.error("邊特徵 Tensor 的第一維與邊數量不匹配！忽略邊特徵。")
+                      edge_feats_tensor = None
+                      edge_feats = None
+                 elif self.edge_feat_dim is not None and edge_feats_tensor.ndim > 1 and edge_feats_tensor.shape[1] != self.edge_feat_dim:
+                      logger.error(f"輸入邊特徵維度 ({edge_feats_tensor.shape[1]}) 與現有 ({self.edge_feat_dim}) 不匹配！忽略邊特徵。")
+                      edge_feats_tensor = None
+                      edge_feats = None
 
-        # 高效映射建立 - 為了快速索引查找
-        node_idx_map = {nid: i for i, nid in enumerate(node_list)}
 
-        # 高效邊過濾 - 使用字典結構和集合操作加速
-        if self.edge_index_format:
-            # 使用邊索引格式時的高效過濾
-            src_array, dst_array = self.edge_index
-            time_filtered_edges = []
+        # --- 篩選有效的、新的邊 ---
+        new_internal_src_indices = []
+        new_internal_dst_indices = []
+        valid_edge_original_indices = [] # 記錄有效邊在輸入列表中的原始索引
 
-            # 批量檢查時間戳
-            for edge_idx, (src, dst) in enumerate(zip(src_array, dst_array)):
-                edge_key = (src, dst)
-                if edge_key in self.edge_timestamps:
-                    timestamp = self.edge_timestamps[edge_key]
-                    if timestamp >= start_time and src in node_set and dst in node_set:
-                        time_filtered_edges.append((edge_idx, src, dst, timestamp))
+        current_sys_time = time.time()
+        max_timestamp_in_batch = 0.0
 
-                        # 限制邊數量
-                        if self.use_subgraph_sampling and len(time_filtered_edges) >= self.max_edges_per_subgraph:
-                            break
+        for i, (src_orig, dst_orig) in enumerate(zip(src_nodes, dst_nodes)):
+            edge_key_orig = (src_orig, dst_orig)
+            # 檢查節點是否存在於映射中，且邊是新的
+            if src_orig in self.node_id_map and dst_orig in self.node_id_map and \
+               edge_key_orig not in self.existing_edges:
 
-            # 從過濾後的邊中提取信息
-            if time_filtered_edges:
-                edge_indices, filtered_src, filtered_dst, filtered_times = zip(*time_filtered_edges)
+                internal_src = self.node_id_map[src_orig]
+                internal_dst = self.node_id_map[dst_orig]
 
-                # 獲取新的連續索引
-                temporal_src = [node_idx_map[src] for src in filtered_src]
-                temporal_dst = [node_idx_map[dst] for dst in filtered_dst]
-                temporal_edge_times = list(filtered_times)
+                new_internal_src_indices.append(internal_src)
+                new_internal_dst_indices.append(internal_dst)
+                valid_edge_original_indices.append(i)
 
-                # 獲取邊特徵
-                if self.edge_feat_dim is not None:
-                    temporal_edge_feats = []
-                    for s, d in zip(filtered_src, filtered_dst):
-                        edge_key = (s, d)
-                        if edge_key in self.edge_features:
-                            temporal_edge_feats.append(self.edge_features[edge_key])
-                        else:
-                            # 對於沒有特徵的邊, 使用零向量
-                            temporal_edge_feats.append([0.0] * self.edge_feat_dim)
-        else:
-            # 標準格式的高效過濾
-            edge_count = 0
-            for (src, dst), timestamp in self.edge_timestamps.items():
-                if timestamp >= start_time and src in node_set and dst in node_set:
-                    # 獲取節點索引
-                    src_idx = node_idx_map[src]
-                    dst_idx = node_idx_map[dst]
+                # 更新節點活躍時間
+                self.node_last_active[src_orig] = current_sys_time
+                self.node_last_active[dst_orig] = current_sys_time
 
-                    temporal_src.append(src_idx)
-                    temporal_dst.append(dst_idx)
-                    temporal_edge_times.append(timestamp)
+                # 更新最大時間戳
+                current_timestamp = float(timestamps[i]) # 確保是 float
+                max_timestamp_in_batch = max(max_timestamp_in_batch, current_timestamp)
 
-                    # 邊特徵
-                    if (src, dst) in self.edge_features:
-                        temporal_edge_feats.append(self.edge_features[(src, dst)])
-                    else:
-                        # 對於沒有特徵的邊, 使用零向量
-                        temporal_edge_feats.append([0.0] * self.edge_feat_dim if self.edge_feat_dim else [])
+        if not new_internal_src_indices:
+            logger.debug("沒有新的有效邊需要添加到 DGL 圖。")
+            return # 沒有需要添加的新邊
 
-                    edge_count += 1
+        # --- 批量添加到 DGL 圖 (使用內部索引) ---
+        num_edges_before = self.g.num_edges()
+        self.g = dgl.add_edges(self.g, new_internal_src_indices, new_internal_dst_indices)
+        added_count = self.g.num_edges() - num_edges_before
+        logger.info(f"嘗試添加 {len(new_internal_src_indices)} 條邊，實際添加到 DGL 圖 {added_count} 條。")
+        if added_count != len(new_internal_src_indices):
+             # 這通常發生在 DGL 內部去除了重複邊或自環（取決於 DGL 版本和設置）
+             logger.warning(f"DGL 添加邊的數量與預期不符，可能 DGL 自動處理了重複邊或自環。")
 
-                    # 如果啟用子圖採樣且邊數量超過限制, 提前結束
-                    if self.use_subgraph_sampling and edge_count >= self.max_edges_per_subgraph:
-                        logger.info(f"邊數量達到限制 {self.max_edges_per_subgraph}, 提前結束邊過濾")
-                        break
 
-        # 建立時間子圖 - 使用最適合的表示方法
-        if len(temporal_src) > 0:
-            if self.use_sparse_representation:
-                # 使用DGL的稀疏表示API
-                if self.use_csr_format:
-                    # 創建CSR格式的稀疏圖
-                    indices = torch.tensor([temporal_src, temporal_dst], dtype=torch.int64)
-                    # 創建稀疏鄰接矩陣
-                    adj = torch.sparse_coo_tensor(
-                        indices=indices,
-                        values=torch.ones(len(temporal_src)),
-                        size=(len(node_list), len(node_list))
-                    )
-                    # 轉換為CSR格式
-                    csr = adj.to_sparse_csr()
+        # --- 更新邊相關的字典 (使用原始 ID 對作為鍵) ---
+        for i, original_idx in enumerate(valid_edge_original_indices):
+            # 需要確保 i 對應到正確添加的邊，如果 added_count < len(...) 則需要更複雜的映射
+            # 為了簡化，我們先假設 add_edges 返回的順序與輸入對應（在無重複和自環時通常如此）
+            # 如果 DGL 行為不確定，這裡可能需要基於 internal indices 重新查找邊 ID
+            src_orig = src_nodes[original_idx]
+            dst_orig = dst_nodes[original_idx]
+            edge_key_orig = (src_orig, dst_orig)
 
-                    # 使用DGL的from_csr構造函數
-                    if hasattr(dgl, 'from_csr'):
-                        indptr = csr.crow_indices()
-                        indices = csr.col_indices()
-                        data = csr.values()
-                        self.temporal_g = dgl.from_csr(indptr, indices, data, len(node_list))
-                    else:
-                        # 備用方法: 仍使用標準構造
-                        self.temporal_g = dgl.graph((temporal_src, temporal_dst),
-                                                num_nodes=len(node_list),
-                                                idtype=torch.int64,
-                                                device='cpu')
-                else:
-                    # 使用稀疏COO表示
-                    self.temporal_g = dgl.graph((temporal_src, temporal_dst),
-                                            num_nodes=len(node_list),
-                                            idtype=torch.int64,
-                                            device='cpu')
+            # 再次檢查邊是否已在集合中（以防 DGL 自動去重導致問題）
+            if edge_key_orig not in self.existing_edges:
+                self.existing_edges.add(edge_key_orig) # 添加到已存在邊集合
+                self.edge_timestamps[edge_key_orig] = float(timestamps[original_idx])
+                if edge_feats is not None:
+                     # 從 Tensor 或原始列表中獲取對應特徵
+                     feat_to_store = edge_feats_tensor[original_idx] if edge_feats_tensor is not None else edge_feats[original_idx]
+                     self.edge_features[edge_key_orig] = feat_to_store
+
+                # 更新輔助映射 (原始 ID)
+                self.src_to_dst[src_orig].add(dst_orig)
+                self.dst_to_src[dst_orig].add(src_orig)
             else:
-                # 使用密集表示
-                self.temporal_g = dgl.graph((temporal_src, temporal_dst),
-                                        num_nodes=len(node_list),
-                                        idtype=torch.int64,
-                                        device='cpu')
-        else:
-            # 如果沒有邊, 創建空圖
-            self.temporal_g = dgl.graph(([], []),
-                                     num_nodes=len(node_list),
-                                     idtype=torch.int64,
-                                     device='cpu')
+                 # 這通常不應發生在篩選邏輯正確的情況下
+                 logger.warning(f"邊 {edge_key_orig} 在更新字典時已存在於 existing_edges 中，跳過字典更新。")
 
-        # 獲取節點特徵 - 向量化操作
-        node_features = []
-        for nid in node_list:
-            if nid in self.node_features:
-                node_features.append(self.node_features[nid])
-            else:
-                # 對於沒有特徵的節點, 使用零向量
-                node_features.append(torch.zeros(self.node_feat_dim))
 
-        # 設置節點特徵
-        if node_features:
-            self.temporal_g.ndata['h'] = torch.stack(node_features)
+        # 更新圖的當前邏輯時間
+        self.current_time = max(self.current_time, max_timestamp_in_batch)
 
-        # 設置邊特徵和時間戳記
-        if temporal_edge_feats:
-            self.temporal_g.edata['h'] = torch.tensor(temporal_edge_feats)
-        if temporal_edge_times:
-            self.temporal_g.edata['time'] = torch.tensor(temporal_edge_times)
+        # 清空鄰居採樣緩存
+        if self.cache_neighbor_sampling: self.neighbor_cache.clear()
 
-        # 設置節點標籤
-        node_labels = []
-        for nid in node_list:
-            if nid in self.node_labels:
-                node_labels.append(self.node_labels[nid])
-            else:
-                node_labels.append(-1)
+        logger.info(f"添加邊完成，當前 DGL 圖總邊數: {self.g.num_edges()}, 記錄的唯一邊數: {len(self.existing_edges)}")
 
-        if node_labels:
-            self.temporal_g.ndata['label'] = torch.tensor(node_labels)
-
-        # 使用DGL的transform API優化圖
-        if self.use_dgl_transform:
-            # 添加自環 - 確保圖有完整連接性
-            self.temporal_g = dgl.add_self_loop(self.temporal_g)
-
-            # 如果支持, 轉換為最適合的圖格式
-            try:
-                if self.use_csr_format and hasattr(dgl.transforms, 'to_simple_graph'):
-                    # 將圖轉換為簡單圖 - 合併多重邊
-                    self.temporal_g = dgl.transforms.to_simple_graph(self.temporal_g)
-            except Exception as e:
-                logger.warning(f"圖轉換失敗: {str(e)}")
-
-        # 將圖移至指定裝置
-        if self.device != 'cpu':
-            self.temporal_g = self.temporal_g.to(self.device)
-
-        # 使用緩存優化
-        if self.cache_neighbor_sampling:
-            # 緩存當前時間窗口的子圖
-            self.neighbor_cache[f"{start_time}_{self.current_time}"] = self.temporal_g
-
-            # 限制緩存大小, 清理過舊的緩存
-            if len(self.neighbor_cache) > 10:
-                # 移除最舊的緩存
-                oldest_key = sorted(self.neighbor_cache.keys())[0]
-                del self.neighbor_cache[oldest_key]
-
-        logger.info(f"更新時間圖: {len(temporal_src)} 條邊在時間窗口 {start_time} 到 {self.current_time}")
-
-        return self.temporal_g
 
     @memory_usage_decorator
-    def add_batch(self, node_ids, features, timestamps, src_nodes=None, dst_nodes=None,
-                 edge_timestamps=None, edge_feats=None, labels=None):
+    def update_temporal_graph(self, current_time: Optional[float] = None):
         """
-        批次添加節點和邊 - 高效集成操作
+        更新時間窗口子圖 (修正版：使用節點映射)
 
         參數:
-            node_ids (list): 節點ID列表
-            features (np.ndarray): 節點特徵矩陣
-            timestamps (list): 節點時間戳記列表
-            src_nodes (list, optional): 源節點ID列表
-            dst_nodes (list, optional): 目標節點ID列表
-            edge_timestamps (list, optional): 邊時間戳記列表
-            edge_feats (list, optional): 邊特徵列表
-            labels (list, optional): 節點標籤列表
-        """
-        # 添加節點 - 使用向量化操作
-        self.add_nodes(node_ids, features, timestamps, labels)
-
-        # 添加邊 (如果提供) - 使用批次處理提高效率
-        if src_nodes is not None and dst_nodes is not None and edge_timestamps is not None:
-            self.add_edges_in_batches(src_nodes, dst_nodes, edge_timestamps, edge_feats)
-
-        # 更新時間圖 - 使用優化的子圖構建
-        self.update_temporal_graph()
-
-        return self.temporal_g
-
-    @memory_usage_decorator
-    def simulate_stream(self, node_ids, features, timestamps, labels=None):
-        """
-        模擬流式資料, 自動建立時間性邊 - 優化版本
-
-        參數:
-            node_ids (list): 節點ID列表
-            features (np.ndarray): 節點特徵矩陣
-            timestamps (list): 節點時間戳記列表
-            labels (list, optional): 節點標籤列表
-        """
-        # 添加節點
-        self.add_nodes(node_ids, features, timestamps, labels)
-
-        # 自動建立時間性邊 - 使用高效數據結構
-        src_nodes = []
-        dst_nodes = []
-        edge_timestamps = []
-        edge_feats = []
-
-        # 時間閾值 (秒), 用於決定兩個封包是否"時間接近"
-        time_threshold = 1.0
-
-        # 先按時間排序節點 - 使用NumPy/Pandas高效排序
-        sorted_indices = np.argsort(timestamps)
-        sorted_nodes = [(node_ids[i], timestamps[i]) for i in sorted_indices]
-
-        # 使用滑動窗口優化邊生成 - 避免N^2複雜度
-        window_size = min(100, len(sorted_nodes))  # 動態調整窗口大小
-
-        # 對於每個新節點, 連接到時間窗口內的相關節點
-        for i, (nid, timestamp) in enumerate(sorted_nodes):
-            # 初始化窗口範圍
-            window_start = max(0, i - window_size)
-            window_end = i  # 不包括當前節點
-
-            # 遍歷窗口中的節點
-            for j in range(window_start, window_end):
-                prev_nid, prev_timestamp = sorted_nodes[j]
-
-                # 檢查是否時間接近
-                if abs(timestamp - prev_timestamp) <= time_threshold:
-                    # 隨機決定連接方向 - 雙向連接增加50%
-                    if random.random() < 0.7:  # 70%機率建立邊
-                        # 創建 prev -> current 邊
-                        src_nodes.append(prev_nid)
-                        dst_nodes.append(nid)
-                        edge_timestamps.append(timestamp)
-
-                        # 生成簡單的邊特徵 (時間差和隨機特性)
-                        time_diff = timestamp - prev_timestamp
-                        random_feat = [random.random(), time_diff, random.random()]
-                        edge_feats.append(random_feat)
-
-                        # 隨機決定是否建立反向邊
-                        if random.random() < 0.5:  # 50%機率建立反向邊
-                            src_nodes.append(nid)
-                            dst_nodes.append(prev_nid)
-                            edge_timestamps.append(timestamp)
-
-                            # 反向邊使用相似但不同的特徵
-                            rev_random_feat = [random.random(), -time_diff, random.random()]
-                            edge_feats.append(rev_random_feat)
-
-            # 優化: 動態調整窗口大小以控制邊密度
-            # 如果節點多, 我們可以使用小窗口; 如果節點少, 使用大窗口
-            if i % 50 == 0:
-                edge_density = len(src_nodes) / max(1, len(self.existing_nodes))
-                if edge_density > 10:  # 邊密度過高
-                    window_size = max(10, window_size // 2)
-                elif edge_density < 2:  # 邊密度過低
-                    window_size = min(200, window_size * 2)
-
-        # 批量添加所有邊
-        if src_nodes:
-            self.add_edges_in_batches(src_nodes, dst_nodes, edge_timestamps, edge_feats)
-
-        # 更新時間圖
-        self.update_temporal_graph()
-
-        logger.info(f"模擬流式數據: 添加 {len(src_nodes)} 條時間性邊")
-
-        return self.temporal_g
-
-    def to_sparse_tensor(self):
-        """
-        將圖轉換為稀疏張量表示 - 用於記憶體高效的表示和計算
+            current_time: 指定當前時間戳 (可選, 否則使用內部 current_time)
 
         返回:
-            tuple: (indices, values, shape) - PyTorch稀疏張量的組件
+            dgl.DGLGraph: 時間窗口內的子圖 (在指定設備上) 或 None (如果圖為空)
         """
-        if not self.g:
-            logger.warning("圖為空, 無法轉換為稀疏張量")
-            return None
+        # 確定用於過濾的時間戳
+        filter_time = current_time if current_time is not None else self.current_time
+        start_time = filter_time - self.temporal_window # 計算窗口起始時間
+        logger.info(f"更新時間圖，窗口: [{start_time:.2f}, {filter_time:.2f}]")
 
-        # 獲取圖的邊
-        if self.edge_index_format:
-            src, dst = self.edge_index
-        else:
-            src, dst = self.g.edges()
+        # --- 獲取當前全局圖 (在 CPU 上操作) ---
+        current_g = self.g
+        if current_g is None or current_g.num_nodes() == 0:
+             logger.warning("全局圖為空，無法創建時間子圖。")
+             self.temporal_g = dgl.graph(([],[]), num_nodes=0, device=self.device if self.device.type != 'cpu' else 'cpu')
+             return self.temporal_g
 
-        # 創建稀疏COO格式表示
-        indices = torch.stack([torch.tensor(src), torch.tensor(dst)])
-        values = torch.ones(len(src))
-        shape = (self.g.num_nodes(), self.g.num_nodes())
+        # --- 篩選時間窗口內的邊 ---
+        # 創建布爾掩碼來標識在時間窗口內的邊
+        edge_mask = torch.zeros(current_g.num_edges(), dtype=torch.bool)
+        active_edge_original_keys_in_window = [] # 保存窗口內邊的原始鍵
 
-        # 使用SciPy稀疏矩陣
-        if sp is not None and self.use_sparse_representation:
+        # 遍歷邊數據字典 (鍵是原始 ID 對)
+        num_edges_in_window = 0
+        for i, edge_key_orig in enumerate(self.existing_edges): # 迭代原始邊集合可能更清晰
+             timestamp = self.edge_timestamps.get(edge_key_orig)
+             if timestamp is not None and timestamp >= start_time and timestamp <= filter_time:
+                 src_orig, dst_orig = edge_key_orig
+                 # 查找對應的邊 ID (如果需要)
+                 # DGL 的 edge_subgraph 可以直接接收邊 ID 列表
+                 # 我們需要找到這個原始邊 key 對應的 DGL 內部邊 ID
+                 # 這一步比較耗時，更好的方法是直接使用 dgl.edge_subgraph 按邊數據過濾
+                 # 假設 edge_timestamps 的迭代順序與圖的邊順序相關（不安全）
+                 # 或者在 edge_timestamps 中也存儲邊 ID?
+                 # **簡化方法**: 我們先收集內部索引，再創建子圖
+                 if src_orig in self.node_id_map and dst_orig in self.node_id_map:
+                      # 找到這條邊在 current_g 中的 ID (可能有多條)
+                      src_internal = self.node_id_map[src_orig]
+                      dst_internal = self.node_id_map[dst_orig]
+                      eids = current_g.edge_ids(src_internal, dst_internal, return_uv=False)
+                      if len(eids) > 0:
+                          edge_mask[eids] = True # 標記這些邊 ID
+                          active_edge_original_keys_in_window.append(edge_key_orig)
+                          num_edges_in_window += len(eids) # 計算窗口內的邊數
+
+        logger.info(f"在時間窗口內找到 {num_edges_in_window} 條邊 (對應 {len(active_edge_original_keys_in_window)} 個原始鍵)")
+
+        # 如果窗口內沒有邊
+        if num_edges_in_window == 0:
+             logger.info("時間窗口內沒有活躍的邊。")
+             self.temporal_g = dgl.graph(([],[]), num_nodes=0, device=self.device if self.device.type != 'cpu' else 'cpu')
+             return self.temporal_g
+
+        # --- 創建時間子圖 ---
+        # 使用掩碼創建邊子圖，並重新標記節點
+        self.temporal_g = dgl.edge_subgraph(current_g, edge_mask, relabel_nodes=True)
+
+        logger.info(f"創建時間子圖: {self.temporal_g.num_nodes()} 節點, {self.temporal_g.num_edges()} 邊")
+
+        # --- 附加節點特徵和標籤到子圖 ---
+        # 子圖的 ndata[dgl.NID] 儲存了其節點對應的原圖內部 ID
+        original_node_internal_ids = self.temporal_g.ndata[dgl.NID]
+        node_features_list = []
+        node_labels_list = []
+
+        for internal_idx in original_node_internal_ids.tolist(): # 轉為列表迭代
+             original_id = self.reverse_node_id_map.get(internal_idx)
+             if original_id is not None:
+                  # 使用原始 ID 從字典獲取數據
+                  feat = self.node_features.get(original_id, torch.zeros(self.node_feat_dim or 1))
+                  label = self.node_labels.get(original_id, -1)
+                  node_features_list.append(feat.float()) # 確保是 float32
+                  node_labels_list.append(label)
+             else:
+                  logger.warning(f"附加節點數據時，內部索引 {internal_idx} 找不到對應的原始 ID。")
+                  node_features_list.append(torch.zeros(self.node_feat_dim or 1))
+                  node_labels_list.append(-1)
+
+        if node_features_list:
+             # 檢查維度是否一致
+             feat_shapes = [f.shape for f in node_features_list]
+             if len(set(feat_shapes)) > 1:
+                 logger.error(f"子圖節點特徵維度不一致: {set(feat_shapes)}。無法堆疊。")
+                 # 可以嘗試填充或報錯
+             else:
+                 self.temporal_g.ndata['feat'] = torch.stack(node_features_list)
+        if node_labels_list:
+             self.temporal_g.ndata['label'] = torch.tensor(node_labels_list, dtype=torch.long)
+
+        # --- 附加邊特徵和時間戳到子圖 ---
+        # 子圖的 edata[dgl.EID] 儲存了其邊對應的原圖邊 ID
+        # 我們需要用這些原圖邊 ID 找到對應的原始鍵 (src_orig, dst_orig)
+        original_edge_internal_ids = self.temporal_g.edata[dgl.EID]
+        edge_features_list = []
+        edge_timestamps_list = []
+        missing_edge_data_count = 0
+
+        # 獲取原圖的邊用於查找
+        orig_src_all, orig_dst_all = current_g.edges()
+
+        for edge_idx_in_subgraph, orig_edge_id in enumerate(original_edge_internal_ids.tolist()):
+             # 獲取這條邊在原圖中的端點（內部索引）
+             src_internal = orig_src_all[orig_edge_id].item()
+             dst_internal = orig_dst_all[orig_edge_id].item()
+             # 轉換為原始 ID
+             src_orig = self.reverse_node_id_map.get(src_internal)
+             dst_orig = self.reverse_node_id_map.get(dst_internal)
+
+             if src_orig is None or dst_orig is None:
+                 missing_edge_data_count += 1
+                 edge_features_list.append(torch.zeros(self.edge_feat_dim or 1))
+                 edge_timestamps_list.append(0.0)
+                 continue
+
+             edge_key_orig = (src_orig, dst_orig)
+             # 使用原始鍵查找數據
+             edge_feat = self.edge_features.get(edge_key_orig)
+             edge_time = self.edge_timestamps.get(edge_key_orig)
+
+             # 處理特徵
+             if edge_feat is None:
+                  edge_features_list.append(torch.zeros(self.edge_feat_dim or 1))
+             elif not isinstance(edge_feat, torch.Tensor):
+                  try:
+                       edge_features_list.append(torch.tensor(edge_feat, dtype=torch.float32))
+                  except: # 如果轉換失敗
+                       edge_features_list.append(torch.zeros(self.edge_feat_dim or 1))
+             else:
+                  edge_features_list.append(edge_feat.float())
+
+             # 處理時間戳
+             if edge_time is None: edge_timestamps_list.append(0.0)
+             else: edge_timestamps_list.append(float(edge_time))
+
+        if missing_edge_data_count > 0:
+            logger.warning(f"在附加邊數據時，有 {missing_edge_data_count} 條邊未能找到其原始節點 ID。")
+
+        if edge_features_list:
+             # 檢查維度一致性
+             feat_shapes = [f.shape for f in edge_features_list]
+             if len(set(feat_shapes)) > 1:
+                 logger.error(f"子圖邊特徵維度不一致: {set(feat_shapes)}。無法堆疊。")
+             else:
+                 self.temporal_g.edata['feat'] = torch.stack(edge_features_list)
+        if edge_timestamps_list:
+             self.temporal_g.edata['time'] = torch.tensor(edge_timestamps_list, dtype=torch.float32)
+
+
+        # --- DGL 優化和設備轉移 ---
+        if self.use_dgl_transform:
             try:
-                # 轉換為SciPy CSR矩陣
-                scipy_sparse = sp.csr_matrix(
-                    (values.numpy(), (indices[0].numpy(), indices[1].numpy())),
-                    shape=shape
-                )
-                logger.info(f"成功轉換為SciPy CSR稀疏矩陣, 大小: {shape}, 非零元素: {scipy_sparse.nnz}")
-                return scipy_sparse
-            except Exception as e:
-                logger.warning(f"轉換為SciPy稀疏矩陣失敗: {str(e)}")
+                 # 添加自環（如果需要）
+                 self.temporal_g = dgl.add_self_loop(self.temporal_g)
+                 logger.debug("已添加自環到時間子圖。")
+                 # 可以考慮其他圖轉換, e.g., dgl.to_bidirected
+            except dgl.DGLError as e:
+                 logger.warning(f"DGL 圖轉換失敗（例如，圖已包含自環或不支持的操作）: {e}")
 
-        # 使用PyTorch稀疏張量
-        sparse_tensor = torch.sparse_coo_tensor(indices, values, shape)
-        logger.info(f"成功轉換為PyTorch稀疏張量, 大小: {shape}, 非零元素: {len(values)}")
+        # 將最終的時間子圖移到目標設備
+        if self.device.type != 'cpu':
+            self.temporal_g = self.temporal_g.to(self.device)
 
-        return sparse_tensor
+        logger.info(f"更新時間圖完成: {self.temporal_g.num_nodes()} 節點, {self.temporal_g.num_edges()} 邊 (在 {self.temporal_g.device})")
+
+        return self.temporal_g
+
+
+    def get_graph(self, temporal: bool = False) -> Optional[dgl.DGLGraph]:
+        """獲取當前圖或時間窗口子圖"""
+        if temporal:
+            if self.temporal_g is None:
+                 logger.info("時間子圖尚未創建，將立即更新。")
+                 self.update_temporal_graph()
+            # 返回副本以避免外部修改影響內部狀態？取決於使用場景
+            return self.temporal_g #.clone() if self.temporal_g else None
+        else:
+            # 返回全局圖的副本？
+            return self.g #.clone() if self.g else None
+
+    def get_node_features(self, node_ids: Optional[List[Any]] = None) -> Optional[torch.Tensor]:
+        """
+        獲取指定節點或所有活躍節點的特徵
+
+        參數:
+            node_ids: 節點 ID 列表 (原始 ID)。如果為 None，返回所有活躍節點的特徵。
+
+        返回:
+            包含節點特徵的 Tensor 或 None
+        """
+        default_feat = torch.zeros(self.node_feat_dim or 1)
+        features_list = []
+
+        if node_ids is None: # 獲取所有活躍節點的特徵
+            if not self.node_features or not self.g or self.g.num_nodes() == 0:
+                 logger.warning("無法獲取所有節點特徵：特徵字典為空或全局圖不存在。")
+                 return None
+            # 按當前 DGL 圖的內部索引順序返回特徵
+            num_nodes_in_g = self.g.num_nodes()
+            for internal_idx in range(num_nodes_in_g):
+                  original_id = self.reverse_node_id_map.get(internal_idx)
+                  if original_id is not None:
+                       features_list.append(self.node_features.get(original_id, default_feat))
+                  else:
+                       logger.warning(f"獲取所有節點特徵時，內部索引 {internal_idx} 找不到原始 ID。")
+                       features_list.append(default_feat)
+        else: # 獲取指定節點的特徵
+             for nid in node_ids:
+                  # 檢查節點是否存在於活躍節點中 (可選)
+                  if nid in self.existing_nodes:
+                       features_list.append(self.node_features.get(nid, default_feat))
+                  else:
+                       logger.debug(f"請求獲取不存在或不活躍的節點 {nid} 的特徵，返回零向量。")
+                       features_list.append(default_feat)
+
+        if not features_list:
+             logger.warning("未能獲取任何有效的節點特徵。")
+             return None
+
+        # 檢查特徵維度是否一致
+        feat_shapes = {f.shape for f in features_list}
+        if len(feat_shapes) > 1:
+            logger.error(f"獲取的節點特徵維度不一致: {feat_shapes}。無法堆疊。")
+            return None # 或者嘗試填充/截斷
+
+        try:
+            return torch.stack(features_list).float() # 確保是 float32
+        except Exception as e:
+             logger.error(f"堆疊節點特徵時出錯: {e}", exc_info=True)
+             return None
+
+
+    def build_graph(self, features: Union[np.ndarray, torch.Tensor],
+                  target: Union[np.ndarray, torch.Tensor],
+                  edge_creation_method: str = 'knn', k: int = 5) -> Optional[dgl.DGLGraph]:
+         """
+         使用提供的特徵和目標數據建立一個靜態圖。主要用於訓練/評估前的準備。
+
+         參數:
+             features: 節點特徵 (Numpy array 或 Tensor, [num_nodes, feat_dim])
+             target: 節點標籤 (Numpy array 或 Tensor, [num_nodes])
+             edge_creation_method: 邊創建方法 ('knn')
+             k: KNN 中的鄰居數量
+
+         返回:
+             dgl.DGLGraph: 創建的圖 (包含 'feat' 和 'label' 數據) 或 None
+         """
+         if features is None or target is None:
+             logger.error("無法建立靜態圖，缺少特徵或目標數據。")
+             return None
+
+         n_nodes = features.shape[0]
+         if n_nodes != len(target):
+             logger.error(f"建立靜態圖錯誤：特徵行數 ({n_nodes}) 與目標數量 ({len(target)}) 不匹配！")
+             return None
+
+         logger.info(f"基於提供的數據建立靜態圖，方法: {edge_creation_method}，節點數: {n_nodes}")
+
+         # 確保數據是 Tensor
+         if isinstance(features, np.ndarray): features = torch.tensor(features, dtype=torch.float32)
+         if isinstance(target, np.ndarray): target = torch.tensor(target, dtype=torch.long) # 標籤通常是 Long
+
+         # 將特徵移到 CPU 進行 KNN 計算
+         features_cpu = features.cpu()
+
+         g = None
+         if edge_creation_method == 'knn':
+             from sklearn.neighbors import kneighbors_graph # 延遲導入
+             try:
+                 # 清理 NaN/Inf
+                 if torch.any(torch.isnan(features_cpu)) or torch.any(torch.isinf(features_cpu)):
+                     logger.warning("靜態圖建立：特徵包含 NaN/Inf，使用 0 填充。")
+                     features_cpu = torch.nan_to_num(features_cpu, nan=0.0, posinf=0.0, neginf=0.0)
+
+                 logger.info(f"計算 KNN 圖 (k={k})...")
+                 # kneighbors_graph 需要 numpy
+                 adj_matrix = kneighbors_graph(features_cpu.numpy(), n_neighbors=k, mode='connectivity', include_self=False)
+                 src, dst = adj_matrix.nonzero()
+                 logger.info(f"KNN 圖邊數: {len(src)}")
+
+                 # 創建 DGL 圖 (在 CPU 上)
+                 g = dgl.graph((src, dst), num_nodes=n_nodes, device='cpu')
+
+             except ImportError:
+                 logger.error("建立 KNN 圖需要安裝 scikit-learn。請運行 'pip install scikit-learn'。")
+                 return None
+             except Exception as e:
+                 logger.error(f"建立 KNN 圖時出錯: {e}", exc_info=True)
+                 return None
+         else:
+             logger.error(f"不支持的靜態圖邊創建方法: {edge_creation_method}")
+             return None
+
+         # 添加節點特徵和標籤
+         g.ndata['feat'] = features # 使用原始的、可能在 GPU 上的 Tensor
+         g.ndata['label'] = target.long() # 確保標籤是 LongTensor
+
+         logger.info(f"靜態圖建立完成: {g.num_nodes()} 節點, {g.num_edges()} 邊")
+         # 將圖移到目標設備
+         g = g.to(self.device)
+         logger.info(f"靜態圖已移至設備: {g.device}")
+         return g
+
+    # --- 其他方法 (simulate_stream, to_sparse_tensor) ---
+    # 警告：這些方法可能需要根據新的 ID 映射機制進行審查和調整
+    def simulate_stream(self, *args, **kwargs):
+        logger.warning("simulate_stream 方法尚未針對新的 ID 映射機制進行驗證，可能需要調整。")
+        # 保留原始邏輯或進行修改
+        pass
+
+    def to_sparse_tensor(self):
+        logger.warning("to_sparse_tensor 方法尚未針對新的 ID 映射機制進行驗證，可能需要調整。")
+        # 保留原始邏輯或進行修改
+        if not self.g: return None
+        # ... (原始邏輯) ...
+        pass

@@ -17,6 +17,8 @@ import pandas as pd
 import numpy as np
 from sklearn.preprocessing import StandardScaler, LabelEncoder
 from sklearn.model_selection import train_test_split
+from sklearn.impute import SimpleImputer # 用於處理 NaN/inf
+from sklearn.feature_selection import VarianceThreshold, f_classif, mutual_info_classif
 import logging
 from tqdm import tqdm
 import gc
@@ -25,2072 +27,1493 @@ import pickle
 import glob
 from datetime import datetime
 import shutil
+import ipaddress # 確保導入
+import warnings # 確保導入
+import dgl # 為 build_graph 示例導入
+import torch # 為 build_graph 示例導入
+from typing import Dict, List, Tuple, Set, Union, Optional, Any
 
 # 導入記憶體優化工具
-from ..utils.memory_utils import (
-    memory_mapped_array, load_memory_mapped_array, save_dataframe_chunked,
-    load_dataframe_chunked, optimize_dataframe_memory, clean_memory,
-    memory_usage_decorator, track_memory_usage, print_memory_usage,
-    get_memory_usage, print_optimization_suggestions, adaptive_batch_size,
-    detect_memory_leaks, limit_gpu_memory
-)
+# 假設 utils 在上層目錄的 src/utils
+# 注意：導入路徑可能需要根據您的實際專案結構調整
+try:
+    from ..utils.memory_utils import (
+        memory_mapped_array, load_memory_mapped_array, save_dataframe_chunked,
+        load_dataframe_chunked, optimize_dataframe_memory, clean_memory,
+        memory_usage_decorator, track_memory_usage, print_memory_usage,
+        get_memory_usage, print_optimization_suggestions, adaptive_batch_size,
+        detect_memory_leaks, limit_gpu_memory
+    )
+except ImportError:
+     print("警告：資料載入器無法從相對路徑導入記憶體工具。嘗試直接導入。")
+     # 如果直接執行此文件或結構不同，則回退
+     try:
+         from utils.memory_utils import (
+             memory_mapped_array, load_memory_mapped_array, save_dataframe_chunked,
+             load_dataframe_chunked, optimize_dataframe_memory, clean_memory,
+             memory_usage_decorator, track_memory_usage, print_memory_usage,
+             get_memory_usage, print_optimization_suggestions, adaptive_batch_size,
+             detect_memory_leaks, limit_gpu_memory
+         )
+     except ImportError as ie:
+          print(f"直接導入 memory_utils 失敗: {ie}。將使用虛設函數。")
+          def memory_mapped_array(*args, **kwargs): raise NotImplementedError
+          def load_memory_mapped_array(*args, **kwargs): raise NotImplementedError
+          def save_dataframe_chunked(*args, **kwargs): raise NotImplementedError
+          def load_dataframe_chunked(*args, **kwargs): raise NotImplementedError
+          def optimize_dataframe_memory(df, *args, **kwargs): return df # 返回原樣
+          def clean_memory(*args, **kwargs): pass
+          def memory_usage_decorator(func): return func
+          def track_memory_usage(*args, **kwargs):
+                def decorator(func):
+                     return func
+                return decorator
+          def print_memory_usage(*args, **kwargs): pass
+          def get_memory_usage(*args, **kwargs): return {}
+          def print_optimization_suggestions(*args, **kwargs): pass
+          def adaptive_batch_size(*args, **kwargs): return args[0] if args else 128
+          def detect_memory_leaks(*args, **kwargs): pass
+          def limit_gpu_memory(*args, **kwargs): pass
 
-# 嘗試導入Polars作為高效率DataFrame替代
+# 嘗試導入 Polars 和 PyArrow
 try:
     import polars as pl
     POLARS_AVAILABLE = True
 except ImportError:
     POLARS_AVAILABLE = False
-    
+
+try:
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    import pyarrow.csv as pc
+    PYARROW_AVAILABLE = True
+except ImportError:
+    PYARROW_AVAILABLE = False
+
+# 配置日誌記錄器
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 class EnhancedMemoryOptimizedDataLoader:
-    """增強版記憶體優化資料載入與預處理類別"""
+    """增強版記憶體優化資料載入與預處理類別 (已修正)"""
 
-    def __init__(self, config):
+    def __init__(self, config: Dict[str, Any]):
         """
         初始化資料載入器
 
         參數:
             config (dict): 配置字典
         """
-        # 從配置中提取資料相關設置
+        # --- 配置讀取與初始化 ---
         data_config = config.get('data', {})
         self.data_path = data_config.get('path', './data')
-        self.test_size = data_config.get('test_size', 0.2)
-        self.random_state = data_config.get('random_state', 42)
-        self.batch_size = data_config.get('batch_size', 128)
+        self.test_size = float(data_config.get('test_size', 0.2))
+        self.random_state = int(data_config.get('random_state', 42))
+        self.batch_size = int(data_config.get('batch_size', 128))
+        self.target_column_name = data_config.get('target_column', None) # 允許配置中指定目標列
 
         # 記憶體優化相關設置
-        self.use_memory_mapping = data_config.get('use_memory_mapping', True)
-        self.save_preprocessed = data_config.get('save_preprocessed', True)
+        self.use_memory_mapping = bool(data_config.get('use_memory_mapping', False))
+        self.save_preprocessed = bool(data_config.get('save_preprocessed', True))
         self.preprocessed_path = data_config.get('preprocessed_path', './preprocessed_data')
-        self.incremental_loading = data_config.get('incremental_loading', True)
-        self.chunk_size_mb = data_config.get('chunk_size_mb', 100)
-        self.use_compression = data_config.get('use_compression', True)
-        self.compression_format = data_config.get('compression_format', 'gzip')
+        self.incremental_loading = bool(data_config.get('incremental_loading', True))
+        self.chunk_size_mb = int(data_config.get('chunk_size_mb', 200))
+        self.use_compression = bool(data_config.get('use_compression', True))
+        # 推薦使用 snappy 或 zstd (如果已安裝) 以獲得更好的性能
+        self.compression_format = data_config.get('compression_format', 'snappy')
 
         # 新增的優化設置
-        self.use_polars = data_config.get('use_polars', POLARS_AVAILABLE)
-        self.use_thread_pool = data_config.get('use_thread_pool', True)
-        self.thread_pool_size = data_config.get('thread_pool_size', 4)
-        self.use_pyarrow = data_config.get('use_pyarrow', True)
-        self.aggressive_dtypes = data_config.get('aggressive_dtypes', True)
-        self.aggressive_gc = data_config.get('aggressive_gc', False)
-        self.chunk_row_limit = data_config.get('chunk_row_limit', 100000)
+        self.use_polars = bool(data_config.get('use_polars', POLARS_AVAILABLE))
+        self.use_pyarrow = bool(data_config.get('use_pyarrow', PYARROW_AVAILABLE))
+        # 警告：積極轉換為 float16 可能損失精度
+        self.aggressive_dtypes = bool(data_config.get('aggressive_dtypes', False))
+        self.aggressive_gc = bool(data_config.get('aggressive_gc', True))
+        self.chunk_row_limit = int(data_config.get('chunk_row_limit', 200000))
 
         # 資料採樣相關設置
-        self.use_sampling = data_config.get('use_sampling', False)
-        self.sampling_strategy = data_config.get('sampling_strategy', 'stratified')
-        self.sampling_ratio = data_config.get('sampling_ratio', 0.1)
-        self.min_samples_per_class = data_config.get('min_samples_per_class', 1000)
+        self.use_sampling = bool(data_config.get('use_sampling', False))
+        self.sampling_strategy = data_config.get('sampling_strategy', 'stratified') # 'stratified' 或 'random'
+        self.sampling_ratio = float(data_config.get('sampling_ratio', 0.1))
+        self.min_samples_per_class = int(data_config.get('min_samples_per_class', 1000)) # 分層採樣時，每個類別的最小樣本數
 
         # 確保預處理資料目錄存在
-        if self.save_preprocessed and not os.path.exists(self.preprocessed_path):
-            os.makedirs(self.preprocessed_path)
+        if self.save_preprocessed:
+             try:
+                  os.makedirs(self.preprocessed_path, exist_ok=True)
+                  logger.info(f"預處理目錄確保存在: {self.preprocessed_path}")
+             except OSError as e:
+                  logger.error(f"無法創建預處理目錄 {self.preprocessed_path}: {e}")
+                  self.save_preprocessed = False # 禁用保存
 
         # 初始化預處理工具
         self.scaler = StandardScaler()
         self.label_encoder = LabelEncoder()
 
         # 初始化資料變數
-        self.df = None
-        self.features = None
-        self.target = None
-        self.feature_names = None
-        self.X_train = None
-        self.X_test = None
-        self.y_train = None
-        self.y_test = None
+        self.df: Optional[pd.DataFrame] = None # 原始載入的 DataFrame
+        self.features: Optional[np.ndarray] = None # 預處理後的特徵 (Numpy Array)
+        self.target: Optional[np.ndarray] = None   # 預處理後的目標 (Numpy Array)
+        self.feature_names: Optional[List[str]] = None # 特徵名稱列表
+        self.X_train: Optional[np.ndarray] = None
+        self.X_test: Optional[np.ndarray] = None
+        self.y_train: Optional[np.ndarray] = None
+        self.y_test: Optional[np.ndarray] = None
+        self.train_indices: Optional[np.ndarray] = None # 訓練集索引
+        self.test_indices: Optional[np.ndarray] = None  # 測試集索引
 
-        # 記錄預處理時間戳記
-        self.preprocess_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        # 創建一個時間戳，可用於標記本次處理的文件
+        self.process_run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-        logger.info(f"初始化增強版記憶體優化資料載入器: 資料路徑={self.data_path}")
-        logger.info(f"使用Polars={self.use_polars} 線程池={self.use_thread_pool}(大小={self.thread_pool_size})")
-        logger.info(f"積極的數據類型轉換={self.aggressive_dtypes} 積極的垃圾回收={self.aggressive_gc}")
+        logger.info(f"初始化資料載入器: 資料路徑='{self.data_path}'")
+        logger.info(f"記憶體優化: 映射={self.use_memory_mapping}, 保存預處理={self.save_preprocessed}, 增量載入={self.incremental_loading}")
+        logger.info(f"效能: 使用 Polars={self.use_polars}, PyArrow={self.use_pyarrow}")
+        logger.info(f"資料採樣: 啟用={self.use_sampling}, 策略={self.sampling_strategy}, 比例={self.sampling_ratio}")
+
+    def _get_preprocessed_files(self) -> Dict[str, str]:
+        """獲取預處理文件路徑 (使用固定名稱 + Parquet/Numpy/Pickle)"""
+        # 使用固定名稱以方便查找和覆蓋舊文件
+        file_prefix = "preprocessed_data"
+
+        # 定義各種文件的路徑
+        # 特徵和目標使用 Numpy 保存，因為它們是預處理的最終數值輸出
+        features_file = os.path.join(self.preprocessed_path, f"{file_prefix}_features.npy")
+        target_file = os.path.join(self.preprocessed_path, f"{file_prefix}_target.npy")
+        # 其他元數據使用 Pickle 保存
+        feature_names_file = os.path.join(self.preprocessed_path, f"{file_prefix}_feature_names.pkl")
+        scaler_file = os.path.join(self.preprocessed_path, f"{file_prefix}_scaler.pkl")
+        label_encoder_file = os.path.join(self.preprocessed_path, f"{file_prefix}_label_encoder.pkl")
+        # 訓練/測試索引使用 Numpy 保存
+        train_indices_file = os.path.join(self.preprocessed_path, f"{file_prefix}_train_indices.npy")
+        test_indices_file = os.path.join(self.preprocessed_path, f"{file_prefix}_test_indices.npy")
+
+        return {
+            'features': features_file,
+            'target': target_file,
+            'feature_names': feature_names_file,
+            'scaler': scaler_file,
+            'label_encoder': label_encoder_file,
+            'train_indices': train_indices_file,
+            'test_indices': test_indices_file
+        }
+
+    def _check_preprocessed_exists(self) -> bool:
+        """檢查所有必要的預處理文件是否存在"""
+        files = self._get_preprocessed_files()
+        # 定義必要的文件組件
+        required_files = ['features', 'target', 'scaler', 'label_encoder', 'feature_names']
+        all_exist = all(os.path.exists(files[f]) for f in required_files)
+
+        if not all_exist:
+             missing = [name for name in required_files if not os.path.exists(files[name])]
+             logger.info(f"必要的預處理文件缺失: {missing}")
+        return all_exist
 
     @memory_usage_decorator
     def load_data(self):
-        """載入資料集 - 使用進階優化"""
-        logger.info(f"載入資料集從: {self.data_path}")
+        """
+        載入資料集。
+        如果存在且完整，則載入預處理數據；否則載入原始數據。
+        """
+        logger.info(f"開始載入資料，資料路徑: '{self.data_path}'")
+        print_memory_usage("載入資料開始")
 
-        # 檢查預處理資料
+        # 1. 嘗試載入預處理數據
         if self.save_preprocessed and self._check_preprocessed_exists():
-            logger.info("發現預處理資料，直接加載")
+            logger.info("發現完整的預處理文件，嘗試直接載入...")
             success = self._load_preprocessed_data()
             if success:
-                logger.info("預處理資料加載成功")
-                return self.df
+                logger.info("預處理資料載入成功。")
+                # self.df 保持為 None，因為數據在 self.features/target 中
+                print_memory_usage("預處理資料載入後")
+                return self.df # 返回 None
             else:
-                logger.warning("預處理資料加載失敗，將重新處理原始資料")
+                logger.warning("預處理資料載入失敗，將重新處理原始資料。")
+                self._reset_data_attributes() # 清理可能部分加載的數據
 
-        # 判斷是否為目錄或單一文件
+        # 2. 如果預處理數據載入失敗或不存在，載入原始數據
+        logger.info("載入原始數據...")
         if os.path.isdir(self.data_path):
-            # 載入目錄中的所有CSV檔案
-            all_files = [os.path.join(self.data_path, f)
-                        for f in os.listdir(self.data_path)
-                        if f.endswith('.csv')]
-
+            # 處理目錄中的所有 CSV 文件
+            all_files = sorted([os.path.join(self.data_path, f)
+                                for f in os.listdir(self.data_path)
+                                if f.endswith('.csv') and not f.startswith('.')]) # 忽略隱藏文件
             if not all_files:
-                raise ValueError("未找到有效的CSV檔案")
+                raise ValueError(f"在目錄 '{self.data_path}' 中未找到有效的 CSV 檔案")
+            logger.info(f"找到 {len(all_files)} 個 CSV 檔案進行處理: {all_files[:3]}...") # 只顯示前幾個
 
-            # 使用Polars加載(如果可用)
             if self.use_polars and POLARS_AVAILABLE:
                 self._load_with_polars(all_files)
             elif self.incremental_loading:
-                # 增量式加載
                 self._load_with_incremental_processing(all_files)
             else:
-                # 一次性加載所有文件
                 self._load_data_at_once(all_files)
-        else:
-            # 載入單一CSV檔案
+
+        elif os.path.isfile(self.data_path) and self.data_path.endswith('.csv'):
+            # 處理單個 CSV 文件
             if self.use_polars and POLARS_AVAILABLE:
                 self._load_single_file_with_polars(self.data_path)
             elif self.incremental_loading:
                 self._load_single_file_incrementally(self.data_path)
             else:
-                self.df = pd.read_csv(self.data_path, low_memory=False)
-                logger.info(f"載入資料集形狀: {self.df.shape}")
+                self._load_data_at_once([self.data_path])
+        elif os.path.isfile(self.data_path) and self.data_path.endswith('.parquet'):
+            # 支持讀取單個 Parquet 文件
+             logger.info("一次性載入單個 Parquet 檔案...")
+             engine = 'pyarrow' if PYARROW_AVAILABLE else 'fastparquet' # fastparquet 是備選
+             try:
+                  self.df = pd.read_parquet(self.data_path, engine=engine)
+                  logger.info(f"載入 Parquet 檔案完成，形狀: {self.df.shape}")
+             except Exception as e:
+                  logger.error(f"使用 {engine} 引擎讀取 Parquet 失敗: {e}")
+                  raise # 拋出錯誤
 
-        # 優化 DataFrame 記憶體使用 - 使用更積極的優化
-        if self.df is not None:
+        else:
+            raise FileNotFoundError(f"指定的資料路徑無效或不是支持的文件類型(CSV/Parquet): '{self.data_path}'")
+
+        # 3. 記憶體優化
+        if self.df is not None and not self.df.empty:
+            logger.info("對載入的原始 DataFrame 進行記憶體優化...")
             self.df = self._enhanced_optimize_dataframe_memory(self.df)
+            print_memory_usage("原始數據優化後")
+        elif self.df is None or self.df.empty:
+            # 如果執行到這裡 self.df 還是空，說明原始數據載入失敗
+            raise RuntimeError("原始資料載入失敗，未能獲取 DataFrame。")
 
-        return self.df
+        # 載入完成後清理記憶體
+        if self.aggressive_gc: clean_memory()
 
-    def _process_ip_addresses(self, df):
-        """處理IP地址列，保留子網關係和結構信息"""
-        import ipaddress
-        import socket
-        
-        # 檢測可能的IP地址列
+        return self.df # 返回載入並優化後的原始 DataFrame (如果需要)
+
+    # --- 數據載入輔助方法 (_load_with_polars, _load_with_incremental_processing 等) ---
+    # --- 這些方法的實現可以保持與之前版本類似，確保它們最終設置 self.df ---
+    # --- 為保持程式碼完整性，這裡包含這些方法的骨架或完整實現 ---
+
+    def _load_with_polars(self, file_paths: List[str]):
+        """使用 Polars 載入多個 CSV 或 Parquet 文件"""
+        if not POLARS_AVAILABLE:
+            logger.warning("Polars 未安裝，回退到 Pandas 增量處理。")
+            return self._load_with_incremental_processing(file_paths)
+
+        logger.info(f"使用 Polars 載入 {len(file_paths)} 個文件...")
+        lazy_frames = []
+        for file_path in tqdm(file_paths, desc="使用 Polars 讀取文件"):
+            try:
+                if file_path.endswith('.csv'):
+                    # 嘗試自動推斷分隔符和類型
+                    lf = pl.scan_csv(file_path, try_parse_dates=True, ignore_errors=True) # ignore_errors 處理潛在的解析問題
+                elif file_path.endswith('.parquet'):
+                    lf = pl.scan_parquet(file_path)
+                else:
+                    logger.warning(f"不支持的文件類型: {file_path}，已跳過。")
+                    continue
+                lazy_frames.append(lf)
+            except Exception as e:
+                 logger.error(f"使用 Polars 讀取文件 {file_path} 時出錯: {e}", exc_info=True)
+
+        if not lazy_frames:
+             raise ValueError("未能使用 Polars 成功讀取任何文件。")
+
+        try:
+            logger.info("合併 Polars LazyFrames...")
+            # 合併所有 LazyFrames
+            combined_lf = pl.concat(lazy_frames)
+            # 執行計算並轉換為 Pandas DataFrame
+            logger.info("執行 Polars 計算並轉換為 Pandas DataFrame...")
+            self.df = combined_lf.collect().to_pandas()
+            logger.info(f"Polars 載入完成，DataFrame 形狀: {self.df.shape}")
+            print_memory_usage("Polars 載入後")
+        except Exception as e:
+             logger.error(f"合併 Polars LazyFrames 或轉換為 Pandas 時出錯: {e}", exc_info=True)
+             # 回退到 Pandas 處理
+             logger.warning("Polars 處理失敗，回退到 Pandas 增量處理。")
+             self.df = None # 清空可能不完整的 df
+             self._load_with_incremental_processing(file_paths)
+
+
+    def _load_single_file_with_polars(self, file_path: str):
+        """使用 Polars 載入單個 CSV 或 Parquet 文件"""
+        if not POLARS_AVAILABLE:
+            logger.warning("Polars 未安裝，回退到 Pandas 處理。")
+            return self._load_single_file_incrementally(file_path)
+
+        logger.info(f"使用 Polars 載入單個文件: {file_path}")
+        try:
+            if file_path.endswith('.csv'):
+                lf = pl.scan_csv(file_path, try_parse_dates=True, ignore_errors=True)
+            elif file_path.endswith('.parquet'):
+                lf = pl.scan_parquet(file_path)
+            else:
+                raise ValueError(f"不支持的文件類型: {file_path}")
+
+            self.df = lf.collect().to_pandas()
+            logger.info(f"Polars 載入完成，DataFrame 形狀: {self.df.shape}")
+            print_memory_usage("Polars 載入後")
+        except Exception as e:
+            logger.error(f"使用 Polars 讀取文件 {file_path} 時出錯: {e}", exc_info=True)
+            logger.warning("Polars 處理失敗，回退到 Pandas 增量處理。")
+            self.df = None
+            self._load_single_file_incrementally(file_path)
+
+
+    def _load_with_incremental_processing(self, file_paths: List[str]):
+        """使用 Pandas 增量讀取和處理多個文件"""
+        logger.info(f"使用 Pandas 增量載入 {len(file_paths)} 個文件...")
+        all_chunks = []
+        total_rows = 0
+        engine = 'pyarrow' if PYARROW_AVAILABLE else 'python' # 選擇讀取引擎
+
+        for file_path in tqdm(file_paths, desc="增量讀取文件"):
+            try:
+                # 計算基於 MB 的 chunksize
+                avg_row_size_mb = 0.0001 # 假設一個較小的初始行大小 (MB)
+                try:
+                    # 嘗試讀取第一行估算大小
+                     df_sample = pd.read_csv(file_path, nrows=1, engine=engine)
+                     avg_row_size_mb = df_sample.memory_usage(deep=True).sum() / (1024 * 1024)
+                except: pass # 如果讀取失敗，使用預設值
+
+                chunksize_rows = int(self.chunk_size_mb / max(avg_row_size_mb, 0.00001)) # 計算行數
+                chunksize_rows = max(10000, min(chunksize_rows, self.chunk_row_limit)) # 限制 chunksize 範圍
+
+                logger.debug(f"文件 '{os.path.basename(file_path)}': 估算行大小 {avg_row_size_mb:.4f}MB, 使用 chunksize {chunksize_rows} 行")
+
+                reader = pd.read_csv(file_path, chunksize=chunksize_rows, low_memory=False, engine=engine)
+                for chunk in reader:
+                    chunk_optimized = self._enhanced_optimize_dataframe_memory(chunk)
+                    all_chunks.append(chunk_optimized)
+                    total_rows += len(chunk)
+                    if self.aggressive_gc: clean_memory() # 在處理每個 chunk 後清理
+            except Exception as e:
+                 logger.error(f"讀取或處理文件 {file_path} 時出錯: {e}", exc_info=True)
+                 continue # 跳過錯誤的文件
+
+        if not all_chunks:
+            raise ValueError("未能成功讀取任何數據塊。")
+
+        logger.info(f"正在合併 {len(all_chunks)} 個數據塊，總計 {total_rows} 行...")
+        self.df = pd.concat(all_chunks, ignore_index=True)
+        logger.info(f"Pandas 增量載入完成，DataFrame 形狀: {self.df.shape}")
+        print_memory_usage("Pandas 增量載入後")
+        # 釋放 chunks 列表記憶體
+        del all_chunks
+        gc.collect()
+
+
+    def _load_single_file_incrementally(self, file_path: str):
+        """使用 Pandas 增量讀取和處理單個文件"""
+        logger.info(f"使用 Pandas 增量載入單個文件: {file_path}")
+        # 與 _load_with_incremental_processing 類似，但只處理一個文件
+        self._load_with_incremental_processing([file_path])
+
+
+    def _load_data_at_once(self, file_paths: List[str]):
+        """一次性載入所有指定文件 (可能消耗大量記憶體)"""
+        logger.warning("執行一次性數據載入，對於大型數據集可能導致記憶體不足。")
+        all_dfs = []
+        engine = 'pyarrow' if PYARROW_AVAILABLE else 'python'
+        for file_path in tqdm(file_paths, desc="一次性載入文件"):
+            try:
+                df_part = pd.read_csv(file_path, low_memory=False, engine=engine)
+                all_dfs.append(df_part)
+            except Exception as e:
+                 logger.error(f"一次性讀取文件 {file_path} 時出錯: {e}", exc_info=True)
+                 continue
+
+        if not all_dfs:
+            raise ValueError("未能成功讀取任何文件。")
+
+        logger.info(f"正在合併 {len(all_dfs)} 個 DataFrames...")
+        self.df = pd.concat(all_dfs, ignore_index=True)
+        logger.info(f"一次性載入完成，DataFrame 形狀: {self.df.shape}")
+        print_memory_usage("一次性載入後")
+        del all_dfs
+        gc.collect()
+
+    # --- IP 地址處理 ---
+    def _process_ip_addresses(self, df: pd.DataFrame) -> pd.DataFrame:
+        """處理IP地址列，保留子網關係和結構信息 (已修正錯誤處理和類型)"""
         ip_columns = [col for col in df.columns if 'IP' in col or 'ip' in col.lower()]
         if not ip_columns:
-            logger.info("未檢測到IP地址列")
+            logger.info("未檢測到IP地址列，跳過 IP 地址處理。")
             return df
-            
-        logger.info(f"檢測到 {len(ip_columns)} 個可能的IP地址列: {ip_columns}")
-        df_processed = df.copy()
-        
-        for col in ip_columns:
-            try:
-                # 檢查是否真的是IP地址列
-                sample_values = df[col].dropna().head(100).astype(str)
-                
-                # 檢測樣本中是否有有效的IP地址
-                valid_ip_count = 0
-                for val in sample_values:
-                    try:
-                        # 嘗試解析IPv4/IPv6地址
-                        ipaddress.ip_address(val.strip())
-                        valid_ip_count += 1
-                    except:
-                        pass
-                        
-                # 如果超過50%的樣本是有效IP地址，則處理此列
-                if valid_ip_count / len(sample_values) > 0.5:
-                    logger.info(f"確認 '{col}' 為IP地址列，開始提取特徵")
-                    
-                    # 創建新的特徵列
-                    octet_cols = []
-                    subnet_cols = []
-                    df_processed[f"{col}_is_private"] = False
-                    df_processed[f"{col}_is_global"] = False
-                    
-                    # 提取IP地址的各部分
-                    for i in range(1, 5):
-                        octet_col = f"{col}_octet{i}"
-                        df_processed[octet_col] = pd.NA
-                        octet_cols.append(octet_col)
-                        
-                    # 提取子網信息
-                    for mask in [8, 16, 24]:
-                        subnet_col = f"{col}_subnet{mask}"
-                        df_processed[subnet_col] = pd.NA
-                        subnet_cols.append(subnet_col)
-                        
-                    # 逐行處理IP地址
-                    for idx, ip_str in enumerate(tqdm(df[col].astype(str), desc=f"處理 {col}")):
-                        try:
-                            # 處理IPv4地址
-                            ip_str = ip_str.strip()
-                            ip = ipaddress.ip_address(ip_str)
-                            
-                            # 記錄IP類型
-                            df_processed.at[idx, f"{col}_is_private"] = ip.is_private
-                            df_processed.at[idx, f"{col}_is_global"] = ip.is_global
-                            
-                            if isinstance(ip, ipaddress.IPv4Address):
-                                # 分解IP地址八位組
-                                octets = ip_str.split('.')
-                                for i, octet in enumerate(octets, 1):
-                                    df_processed.at[idx, f"{col}_octet{i}"] = int(octet)
-                                    
-                                # 計算不同掩碼的子網
-                                for mask in [8, 16, 24]:
-                                    subnet = ipaddress.IPv4Network(f"{ip_str}/{mask}", strict=False)
-                                    df_processed.at[idx, f"{col}_subnet{mask}"] = str(subnet)
-                        except Exception as e:
-                            # 跳過無效的IP地址
-                            pass
-                            
-                    # 將提取的特徵轉換為適當的類型
-                    for octet_col in octet_cols:
-                        # 八位組為整數
-                        df_processed[octet_col] = pd.to_numeric(df_processed[octet_col], errors='coerce')
-                        df_processed[octet_col].fillna(-1, inplace=True)
-                        df_processed[octet_col] = df_processed[octet_col].astype('int16')
-                        
-                    for subnet_col in subnet_cols:
-                        # 子網信息為類別
-                        df_processed[subnet_col].fillna("unknown", inplace=True)
-                        df_processed[subnet_col] = df_processed[subnet_col].astype('category')
-                        
-                    # 布爾特徵轉換為整數
-                    df_processed[f"{col}_is_private"] = df_processed[f"{col}_is_private"].astype('int8')
-                    df_processed[f"{col}_is_global"] = df_processed[f"{col}_is_global"].astype('int8')
-                    
-                    # 原始IP地址列轉換為類別型
-                    df_processed[col] = df_processed[col].astype('category')
-                    
-                    logger.info(f"IP地址列 '{col}' 處理完成，生成 {len(octet_cols) + len(subnet_cols) + 2} 個新特徵")
-                else:
-                    logger.info(f"列 '{col}' 經檢測不是IP地址列，跳過處理")
-            except Exception as e:
-                logger.warning(f"處理IP地址列 '{col}' 時出錯: {str(e)}，跳過此列")
-                
-        return df_processed
-    
-    def _perform_statistical_feature_selection(self, df, target, exclude_cols=None):
-        """使用統計方法進行特徵選擇"""
-        import warnings
-        from sklearn.feature_selection import SelectKBest, f_classif, mutual_info_classif, VarianceThreshold
 
-        if exclude_cols is None:
-            exclude_cols = []
-            
-        logger.info("執行基於統計的特徵選擇...")
-        
-        # 建立一個副本以避免修改原始數據
-        df_copy = df.copy()
-        
-        # 分析特徵相關性以檢測多重共線性
-        try:
-            # 僅對數值型列計算相關性矩陣
-            num_cols = df_copy.select_dtypes(include=['int', 'float']).columns
-            if len(num_cols) > 1:
-                corr_matrix = df_copy[num_cols].corr().abs()
-                
-                # 找出高度相關的特徵對 (>0.95)
-                upper_tri = corr_matrix.where(np.triu(np.ones(corr_matrix.shape), k=1).astype(bool))
-                high_corr_pairs = [(corr_matrix.index[i], corr_matrix.columns[j], upper_tri.iloc[i, j]) 
-                                   for i, j in zip(*np.where(upper_tri > 0.95))]
-                
-                if high_corr_pairs:
-                    logger.warning(f"發現 {len(high_corr_pairs)} 對高度相關特徵:")
-                    for col1, col2, corr in high_corr_pairs[:10]:  # 只顯示前10對
-                        logger.warning(f"  - {col1} 與 {col2}: 相關性 = {corr:.3f}")
-                    
-                    # 對於每對高相關特徵，保留方差較大的一個
-                    cols_to_drop = set()
-                    for col1, col2, _ in high_corr_pairs:
-                        if col1 in exclude_cols or col2 in exclude_cols:
-                            continue  # 跳過排除列
-                            
-                        var1 = df_copy[col1].var()
-                        var2 = df_copy[col2].var()
-                        
-                        if var1 >= var2:
-                            cols_to_drop.add(col2)
-                        else:
-                            cols_to_drop.add(col1)
-                    
-                    # 避免刪除已經手動排除的列
-                    cols_to_drop = cols_to_drop - set(exclude_cols)
-                    
-                    if cols_to_drop:
-                        logger.info(f"基於相關性分析移除 {len(cols_to_drop)} 列: {', '.join(list(cols_to_drop)[:5])}...")
-                        df_copy = df_copy.drop(columns=list(cols_to_drop))
-        except Exception as e:
-            logger.warning(f"計算相關性矩陣時出錯: {str(e)}")
-                
-        # 移除低方差特徵
-        try:
-            # 僅處理數值型列
-            num_cols = df_copy.select_dtypes(include=['int', 'float']).columns
-            if len(num_cols) > 0:
-                variance_selector = VarianceThreshold(threshold=0.01)  # 設置方差閾值
-                
-                with warnings.catch_warnings():
-                    warnings.simplefilter("ignore")
-                    num_features_selected = variance_selector.fit_transform(df_copy[num_cols])
-                
-                selected_mask = variance_selector.get_support()
-                selected_num_cols = [col for is_selected, col in zip(selected_mask, num_cols) if is_selected]
-                
-                # 計算被刪除的列
-                low_var_cols = [col for is_selected, col in zip(selected_mask, num_cols) if not is_selected]
-                
-                if low_var_cols:
-                    logger.info(f"移除 {len(low_var_cols)} 個低方差特徵: {', '.join(low_var_cols[:5])}...")
-                    high_var_df = df_copy.drop(columns=low_var_cols)
-                    
-                    # 更新DataFrame
-                    df_copy = pd.concat([high_var_df, df_copy.select_dtypes(exclude=['int', 'float'])], axis=1)
-        except Exception as e:
-            logger.warning(f"執行低方差特徵過濾時出錯: {str(e)}")
-                
-        # 基於統計顯著性的特徵選擇
-        try:
-            # 僅處理數值型列
-            num_cols = df_copy.select_dtypes(include=['int', 'float']).columns
-            if len(num_cols) > 0 and len(num_cols) > 0.1 * df.shape[1]:  # 如果數值特徵超過10%
-                X_for_selection = df_copy[num_cols]
-                
-                # 計算特徵重要性分數
+        logger.info(f"檢測到 {len(ip_columns)} 個可能的IP地址列: {ip_columns}")
+        df_processed = df.copy() # 操作副本
+
+        for col in ip_columns:
+            if col not in df_processed.columns:
+                 logger.warning(f"列 '{col}' 在 DataFrame 中不存在，無法處理。")
+                 continue
+
+            # 檢查樣本以確認是否為 IP 列
+            is_ip_col = False
+            try:
+                sample_values = df_processed[col].dropna().astype(str)
+                if not sample_values.empty:
+                    check_limit = min(100, len(sample_values))
+                    valid_ip_count = sum(1 for val in sample_values.head(check_limit) if self._is_valid_ip(val))
+                    if check_limit > 0 and valid_ip_count / check_limit > 0.5:
+                        is_ip_col = True
+            except Exception as e:
+                logger.warning(f"檢查列 '{col}' 是否為IP列時出錯: {str(e)}")
+
+            if not is_ip_col:
+                logger.info(f"列 '{col}' 非主要IP地址列，跳過處理。")
+                continue
+
+            logger.info(f"確認 '{col}' 為IP地址列，開始提取特徵...")
+
+            # --- 創建新特徵列 ---
+            octet_cols = [f"{col}_octet{i}" for i in range(1, 5)]
+            subnet_cols = [f"{col}_subnet{mask}" for mask in [8, 16, 24]]
+            bool_cols = [f"{col}_is_private", f"{col}_is_global"]
+            new_cols = octet_cols + subnet_cols + bool_cols
+            # 初始化為適當的空值
+            for c in octet_cols + subnet_cols: df_processed[c] = -1
+            for c in bool_cols: df_processed[c] = 0
+
+            # --- 處理 IP ---
+            processed_count = 0
+            error_count = 0
+            # 使用 apply 可能比迭代更快，但需要處理錯誤
+            def process_ip_row(ip_str_orig):
+                nonlocal processed_count, error_count # 允許修改外部計數器
+                if pd.isna(ip_str_orig):
+                    error_count += 1
+                    return [-1]*4 + [-1]*3 + [0]*2 # 返回預設值列表
+
+                ip_str = str(ip_str_orig).strip()
                 try:
-                    f_scores, p_values = f_classif(X_for_selection, target)
-                    # 計算互信息
-                    with warnings.catch_warnings():
-                        warnings.simplefilter("ignore")
-                        mi_scores = mutual_info_classif(X_for_selection, target)
+                    ip = ipaddress.ip_address(ip_str)
+                    is_private = int(ip.is_private)
+                    is_global = int(ip.is_global)
+                    octets = [-1] * 4
+                    subnets = [-1] * 3
+
+                    if isinstance(ip, ipaddress.IPv4Address):
+                        oct_parts = ip_str.split('.')
+                        if len(oct_parts) == 4:
+                           try:
+                               octets = [int(p) for p in oct_parts]
+                           except ValueError: # 如果某部分不是數字
+                                pass # 保持 -1
+                        for i, mask in enumerate([8, 16, 24]):
+                            try:
+                                network = ipaddress.IPv4Network(f"{ip_str}/{mask}", strict=False)
+                                subnets[i] = int(network.network_address)
+                            except ValueError: pass # 保持 -1
+
+                    processed_count += 1
+                    return octets + subnets + [is_private, is_global]
+                except ValueError:
+                    error_count += 1
+                    return [-1]*4 + [-1]*3 + [0]*2
                 except Exception as e:
-                    logger.warning(f"計算特徵重要性失敗: {str(e)}")
-                    return df
-                
-                # 創建特徵重要性DataFrame
-                feature_importance = pd.DataFrame({
-                    'Feature': num_cols,
-                    'F_Score': f_scores,
-                    'P_Value': p_values,
-                    'MI_Score': mi_scores
-                })
-                
-                # 根據重要性排序
-                feature_importance = feature_importance.sort_values(by='MI_Score', ascending=False)
-                
-                # 記錄前20個最重要的特徵
-                logger.info("基於互信息的前20個重要特徵:")
-                for i, (feat, score) in enumerate(zip(feature_importance['Feature'].head(20), 
-                                                     feature_importance['MI_Score'].head(20))):
-                    logger.info(f"  {i+1}. {feat}: {score:.6f}")
-                
-                # 識別統計上不顯著的特徵 (p值 > 0.05 且 互信息分數很低)
-                insignificant_features = feature_importance[
-                    (feature_importance['P_Value'] > 0.05) & 
-                    (feature_importance['MI_Score'] < feature_importance['MI_Score'].quantile(0.2))
-                ]['Feature'].tolist()
-                
-                # 避免刪除手動排除的列
-                insignificant_features = [col for col in insignificant_features if col not in exclude_cols]
-                
-                if insignificant_features:
-                    logger.info(f"移除 {len(insignificant_features)} 個統計上不顯著的特徵...")
-                    df_copy = df_copy.drop(columns=insignificant_features)
+                    error_count += 1
+                    logger.debug(f"處理 IP '{ip_str}' 時發生非預期錯誤: {e}")
+                    return [-1]*4 + [-1]*3 + [0]*2
+
+            # 應用處理函數
+            logger.info(f"使用 apply 函數處理列 '{col}'...")
+            results = df_processed[col].progress_apply(process_ip_row) # 使用 tqdm 的 progress_apply
+            logger.info(f"列 '{col}' apply 完成。")
+
+            # 將結果合併回 DataFrame
+            results_df = pd.DataFrame(results.tolist(), index=df_processed.index, columns=new_cols)
+            for new_col in new_cols:
+                 df_processed[new_col] = results_df[new_col]
+
+            logger.info(f"列 '{col}' 處理完成: {processed_count} 個有效IP, {error_count} 個錯誤/無法解析")
+
+            # --- 轉換數據類型 ---
+            for octet_col in octet_cols:
+                df_processed[octet_col] = pd.to_numeric(df_processed[octet_col], errors='coerce').fillna(-1).astype(np.int16)
+            for subnet_col in subnet_cols:
+                df_processed[subnet_col] = pd.to_numeric(df_processed[subnet_col], errors='coerce').fillna(-1).astype(np.int64)
+            for bool_col in bool_cols:
+                 df_processed[bool_col] = df_processed[bool_col].astype(np.int8)
+
+            # --- 移除原始 IP 列 ---
+            if col in df_processed.columns:
+                 df_processed = df_processed.drop(columns=[col])
+                 logger.info(f"已移除原始 IP 地址列 '{col}'")
+
+            logger.info(f"IP 地址列 '{col}' 特徵提取與類型轉換完成")
+            if self.aggressive_gc: clean_memory()
+
+        return df_processed
+
+    def _is_valid_ip(self, ip_str):
+        """檢查字串是否為有效的 IP 地址"""
+        try:
+            ipaddress.ip_address(str(ip_str).strip())
+            return True
+        except ValueError:
+            return False
+
+    # --- 特徵選擇 ---
+    def _perform_statistical_feature_selection(self, df: pd.DataFrame, target: Union[pd.Series, np.ndarray],
+                                               exclude_cols: Optional[List[str]] = None) -> pd.DataFrame:
+        """使用統計方法進行特徵選擇 (已修正 NaN/inf 處理)"""
+        if exclude_cols is None: exclude_cols = []
+
+        logger.info("執行基於統計的特徵選擇...")
+        if df.empty:
+             logger.warning("輸入 DataFrame 為空，跳過特徵選擇。")
+             return df
+
+        # 確保目標是 NumPy 數組且長度匹配
+        if isinstance(target, pd.Series): target_array = target.values
+        elif isinstance(target, np.ndarray): target_array = target
+        else: target_array = np.array(target)
+
+        if len(target_array) != len(df):
+             logger.error(f"特徵選擇錯誤：特徵行數 ({len(df)}) 與目標行數 ({len(target_array)}) 不匹配！")
+             return df
+
+        df_copy = df.copy()
+        original_cols = df_copy.columns.tolist()
+        numeric_cols = df_copy.select_dtypes(include=np.number).columns.tolist()
+        cols_to_process = list(set(numeric_cols) - set(exclude_cols))
+
+        if not cols_to_process:
+            logger.info("沒有數值特徵可供選擇（可能都被排除了）。")
+            return df_copy
+
+        # --- 統一處理 NaN/Inf ---
+        logger.info("在特徵選擇前，使用中位數填充 NaN/Inf...")
+        imputer = SimpleImputer(strategy='median')
+        try:
+            # 只對需要處理的列進行填充
+            df_copy[cols_to_process] = imputer.fit_transform(df_copy[cols_to_process])
+            logger.info("NaN/Inf 填充完成。")
+        except ValueError as e:
+             logger.error(f"填充 NaN/Inf 時發生錯誤 (可能所有值都是 NaN): {e}")
+             # 如果填充失敗，可能無法進行後續選擇，返回副本
+             return df_copy
+
+        # --- 相關性分析 ---
+        try:
+            if len(cols_to_process) > 1:
+                corr_matrix = df_copy[cols_to_process].corr().abs()
+                upper_tri = corr_matrix.where(np.triu(np.ones(corr_matrix.shape, dtype=bool), k=1))
+                high_corr_cols_to_drop = set()
+                # 找出高度相關的特徵對 (>0.95)
+                high_corr_indices = np.where(upper_tri > 0.95)
+                if len(high_corr_indices[0]) > 0:
+                     logger.warning(f"發現 {len(high_corr_indices[0])} 對高度相關 (>0.95) 特徵:")
+                     for i, j in zip(*high_corr_indices):
+                         col1 = upper_tri.columns[j]
+                         col2 = upper_tri.index[i]
+                         logger.debug(f"  - {col1} 和 {col2} (相關性: {upper_tri.iloc[i, j]:.4f})")
+                         # 保留方差較大的特徵
+                         var1 = df_copy[col1].var()
+                         var2 = df_copy[col2].var()
+                         if var1 >= var2: high_corr_cols_to_drop.add(col2)
+                         else: high_corr_cols_to_drop.add(col1)
+
+                     if high_corr_cols_to_drop:
+                         logger.info(f"基於相關性分析，計劃移除 {len(high_corr_cols_to_drop)} 個高相關特徵。")
+                         # 從待刪除列表中移除被排除的列
+                         high_corr_cols_to_drop = list(high_corr_cols_to_drop - set(exclude_cols))
+                         if high_corr_cols_to_drop:
+                              logger.info(f"實際移除高相關特徵: {high_corr_cols_to_drop[:5]}...")
+                              df_copy.drop(columns=high_corr_cols_to_drop, inplace=True)
+                              # 更新待處理列列表
+                              cols_to_process = [col for col in cols_to_process if col not in high_corr_cols_to_drop]
+                         else:
+                              logger.info("所有高相關特徵都在排除列表中，未移除任何特徵。")
+
         except Exception as e:
-            logger.warning(f"執行基於統計的特徵選擇時出錯: {str(e)}")
-        
+            logger.error(f"相關性分析過程中出錯: {e}", exc_info=True)
+
+
+        # --- 低方差特徵移除 ---
+        try:
+            if cols_to_process: # 確保還有列需要處理
+                variance_selector = VarianceThreshold(threshold=0.01)
+                # fit 在已填充的數據上
+                variance_selector.fit(df_copy[cols_to_process])
+                selected_mask = variance_selector.get_support()
+                low_var_cols = [col for is_selected, col in zip(selected_mask, cols_to_process) if not is_selected]
+
+                if low_var_cols:
+                    logger.info(f"移除 {len(low_var_cols)} 個低方差 (<0.01) 特徵: {low_var_cols[:5]}...")
+                    df_copy.drop(columns=low_var_cols, inplace=True)
+                    cols_to_process = [col for col in cols_to_process if col not in low_var_cols]
+        except Exception as e:
+            logger.error(f"執行低方差特徵過濾時出錯: {e}", exc_info=True)
+
+
+        # --- 基於統計顯著性的特徵選擇 (ANOVA F-value & Mutual Information) ---
+        try:
+            if cols_to_process: # 確保還有列需要處理
+                X_selection = df_copy[cols_to_process].values # 使用已填充的數據
+                y_selection = target_array
+
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore") # 抑制可能的 UserWarning
+                    try:
+                        f_scores, p_values = f_classif(X_selection, y_selection)
+                    except ValueError as ve: # 例如，如果 y 只有一個類別
+                        logger.warning(f"計算 ANOVA F 分數失敗: {ve}。跳過基於 F 分數的選擇。")
+                        f_scores, p_values = np.ones(len(cols_to_process)), np.ones(len(cols_to_process)) # 設置為無意義的值
+
+                    try:
+                         mi_scores = mutual_info_classif(X_selection, y_selection, random_state=self.random_state)
+                    except Exception as mi_e:
+                         logger.error(f"計算互信息失敗: {mi_e}。跳過基於 MI 的選擇。")
+                         mi_scores = np.zeros(len(cols_to_process)) # 設置為 0
+
+                feature_importance = pd.DataFrame({
+                    'Feature': cols_to_process,
+                    'F_Score': f_scores, 'P_Value': p_values, 'MI_Score': mi_scores
+                }).fillna(0) # 填充 NaN
+
+                logger.info("基於互信息(MI)的前20個重要特徵:")
+                for i, row in feature_importance.sort_values('MI_Score', ascending=False).head(20).iterrows():
+                    logger.info(f"  {i+1}. {row['Feature']}: MI={row['MI_Score']:.6f} (p={row['P_Value']:.3g})")
+
+                # 根據 P 值和 MI 分數移除不顯著特徵
+                # 條件：P 值 > 0.05 (不顯著) 且 MI 分數低於 20% 分位數
+                mi_quantile_20 = feature_importance['MI_Score'].quantile(0.2)
+                insignificant_features = feature_importance[
+                    (feature_importance['P_Value'] > 0.05) & (feature_importance['MI_Score'] < mi_quantile_20)
+                ]['Feature'].tolist()
+                # 確保不移除被排除的列
+                insignificant_features_final = list(set(insignificant_features) - set(exclude_cols))
+
+                if insignificant_features_final:
+                    logger.info(f"移除 {len(insignificant_features_final)} 個統計上不顯著的特徵: {insignificant_features_final[:5]}...")
+                    df_copy.drop(columns=insignificant_features_final, inplace=True)
+        except Exception as e:
+            logger.error(f"執行基於統計顯著性的特徵選擇時出錯: {e}", exc_info=True)
+
+        # --- 總結移除的特徵 ---
+        final_cols = df_copy.columns.tolist()
+        dropped_cols = list(set(original_cols) - set(final_cols))
+        logger.info(f"特徵選擇完成，共移除 {len(dropped_cols)} 個特徵。剩餘特徵數: {df_copy.shape[1]}")
+        if dropped_cols:
+             logger.debug(f"移除的特徵列表: {dropped_cols}")
+
         return df_copy
-        
-    def _identify_target_column(self):
-        """智能識別目標列（標籤欄位）
-        
-        使用多種啟發式方法確定資料集中的目標/標籤列:
-        1. 檢查配置中是否指定了目標列
-        2. 檢查常見的標籤列名稱
-        3. 分析列特性（分類特性、熵、唯一值比例等）
-        4. 如果都不行，回退到使用最後一列
-        
-        Returns:
-            str: 目標列名稱
-        """
+
+    # --- 目標列識別 ---
+    def _identify_target_column(self) -> str:
+        """智能識別目標列 (增加配置優先級)"""
         # 1. 優先使用配置中指定的目標列
-        if hasattr(self, 'target_column') and self.target_column:
-            if self.target_column in self.df.columns:
-                logger.info(f"使用配置中指定的目標列: '{self.target_column}'")
-                return self.target_column
-                
+        if self.target_column_name:
+             if self.target_column_name in self.df.columns:
+                  logger.info(f"使用配置中指定的目標列: '{self.target_column_name}'")
+                  return self.target_column_name
+             else:
+                  logger.warning(f"配置中指定的目標列 '{self.target_column_name}' 不存在於 DataFrame 中。將嘗試自動識別。")
+
         # 2. 檢查常見的標籤欄位名稱
         common_target_columns = [
-            'label', 'Label', 'target', 'Target', 'class', 'Class', 
-            'attack_type', 'is_attack', 'is_malicious', 'result', 'Result',
-            'y', 'Y', 'output', 'classification', 'category', 'type'
+            'Label', 'label', 'attack_type', 'Class', 'target', 'Target',
+            'is_attack', 'is_malicious', 'Result', 'y', 'output', 'classification', 'category', 'type'
         ]
-        
         for col in common_target_columns:
             if col in self.df.columns:
-                logger.info(f"根據名稱匹配識別到的目標列: '{col}'")
+                logger.info(f"根據常見名稱匹配識別到的目標列: '{col}'")
                 return col
-                
-        # 3. 嘗試通過列特徵識別目標列
-        # 目標列通常是分類型，字串型，或整數型（小範圍）
+
+        # 3. 嘗試通過列特徵識別目標列 (啟發式)
+        logger.info("嘗試通過列特徵自動識別目標列...")
         candidate_cols = []
-        
+        potential_label_types = ['object', 'category', 'int8', 'int16', 'int32', 'int64']
+        num_rows = len(self.df)
+        if num_rows == 0: # 如果 DataFrame 為空，無法識別
+             logger.error("DataFrame 為空，無法自動識別目標列。")
+             raise ValueError("無法識別目標列，因為 DataFrame 為空。")
+
         for col in self.df.columns:
-            # 跳過明顯不是標籤的列
-            if any(skip in col.lower() for skip in ['id', 'timestamp', 'date', 'time', 'feature']):
+            # 排除明顯非標籤的列
+            col_lower = col.lower()
+            if any(skip in col_lower for skip in ['id', 'timestamp', 'date', 'time', 'ip', 'port', 'feature', 'duration', 'sequence', 'number']):
                 continue
-                
-            # 檢查資料類型與分布特徵
+
             col_data = self.df[col]
-            unique_ratio = col_data.nunique() / len(col_data)
-            
-            # 目標列通常有有限的唯一值且分布較均勻
-            if unique_ratio < 0.05 and unique_ratio > 0.0001:
-                candidate_score = 0
-                
-                # 分類特徵得分更高
-                if pd.api.types.is_categorical_dtype(col_data) or pd.api.types.is_object_dtype(col_data):
-                    candidate_score += 5
-                    
-                # 整數型特徵且範圍小也可能是標籤
-                elif pd.api.types.is_integer_dtype(col_data):
-                    value_range = col_data.max() - col_data.min()
-                    if value_range < 100:  # 小範圍整數更可能是標籤
-                        candidate_score += 3
-                
-                # 出現在列名最後面的列通常更可能是標籤
-                position_score = 1.0 - (list(self.df.columns).index(col) / len(self.df.columns))
-                candidate_score += position_score * 2
-                
-                candidate_cols.append((col, candidate_score))
-        
-        # 如果有候選列，選擇得分最高的
+            col_type = str(col_data.dtype)
+
+            if col_type in potential_label_types:
+                try:
+                    num_unique = col_data.nunique(dropna=True)
+                    # 目標列通常唯一值數量有限，但又不是常數
+                    if 1 < num_unique < min(1000, num_rows * 0.1): # 唯一值數量在 1 和 (1000 或 10%行數) 之間
+                        score = 0
+                        if col_type in ['object', 'category']: score += 5 # 類別型優先
+                        elif 'int' in col_type:
+                            val_range = col_data.max() - col_data.min() if pd.api.types.is_numeric_dtype(col_data) and not col_data.empty else float('inf')
+                            if val_range < 50: score += 3
+                            elif val_range < 200: score += 1
+                        # 越靠後的列可能性越大？ (這個啟發式不一定可靠)
+                        # position_score = list(self.df.columns).index(col) / len(self.df.columns)
+                        # score += position_score * 0.5
+                        candidate_cols.append((col, score))
+                except Exception as e:
+                     logger.debug(f"分析列 '{col}' 時出錯: {e}") # 記錄但不中斷
+
         if candidate_cols:
-            # 按得分降序排序
             candidate_cols.sort(key=lambda x: x[1], reverse=True)
             best_col, score = candidate_cols[0]
-            logger.info(f"根據列特徵分析識別到的目標列: '{best_col}' (得分: {score:.2f})")
+            logger.info(f"根據列特徵分析，最可能的目標列是: '{best_col}' (得分: {score:.2f})")
             return best_col
-            
-        # 4. 如果沒有找到合適的目標列，使用最後一列
+
+        # 4. 如果以上方法都失敗，回退到最後一列
         last_col = self.df.columns[-1]
-        logger.warning(f"無法確定目標列，使用最後一列 '{last_col}' 作為目標")
+        logger.warning(f"無法自動確定目標列，將使用最後一列 '{last_col}' 作為目標。強烈建議在配置中明確指定 'target_column'。")
         return last_col
-        
-    def preprocess(self):
-        """預處理資料 - 對數值和分類特徵進行標準化和編碼"""
-        logger.info("開始預處理資料...")
-        
-        # 載入資料
-        if self.df is None:
-            self.load_data()
-            
+
+    # --- 預處理主流程 ---
+    @memory_usage_decorator
+    def preprocess(self) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        執行完整的數據預處理流程。
+
+        返回:
+            (features_np, target_np): 預處理後的特徵和目標 NumPy 數組
+        """
+        logger.info("=" * 50)
+        logger.info("開始數據預處理流程...")
+        print_memory_usage("預處理開始")
+
+        # 1. 確保數據已載入
         if self.df is None or self.df.empty:
-            raise ValueError("資料載入失敗，無法進行預處理")
-            
-        # 進行特徵和目標分離 - 使用智能識別
+            logger.info("DataFrame 為空，執行 load_data()...")
+            self.load_data()
+            if self.df is None or self.df.empty:
+                raise ValueError("資料載入失敗，無法進行預處理。")
+        logger.info(f"預處理開始時 DataFrame 形狀: {self.df.shape}")
+
+        # 2. 資料採樣（如果啟用）
+        if self.use_sampling:
+            logger.info("步驟 2/11: 執行資料採樣...")
+            self._sample_data()
+            logger.info(f"採樣後 DataFrame 形狀: {self.df.shape}")
+            print_memory_usage("資料採樣後")
+        else:
+            logger.info("步驟 2/11: 跳過資料採樣。")
+
+        # 3. 清理列名
+        logger.info("步驟 3/11: 清理列名...")
+        original_columns = self.df.columns.tolist()
+        self.df.columns = ["".join(c if c.isalnum() else '_' for c in str(x).strip()) for x in self.df.columns]
+        renamed_columns = {old: new for old, new in zip(original_columns, self.df.columns) if old != new}
+        if renamed_columns: logger.debug(f"重命名的列: {renamed_columns}")
+
+        # 4. 處理缺失值和無限值
+        logger.info("步驟 4/11: 處理缺失值和無限值...")
+        nan_counts = self.df.isnull().sum()
+        inf_counts = self.df.isin([np.inf, -np.inf]).sum()
+        logger.info(f"處理前 NaN 總數: {nan_counts.sum()}, Inf 總數: {inf_counts.sum()}")
+        # 使用中位數填充數值列的 NaN
+        num_cols_to_impute = self.df.select_dtypes(include=np.number).columns
+        imputer = SimpleImputer(strategy='median')
+        if len(num_cols_to_impute) > 0:
+             self.df[num_cols_to_impute] = imputer.fit_transform(self.df[num_cols_to_impute])
+        # 將剩餘的 NaN (可能是對象類型) 填充為 'missing'
+        self.df.fillna('missing', inplace=True)
+        # 將 Inf 替換為 0 (或其他合適的值)
+        self.df.replace([np.inf, -np.inf], 0, inplace=True)
+        logger.info("缺失值和無限值處理完成。")
+        print_memory_usage("處理缺失值後")
+
+        # 5. 移除常數列
+        logger.info("步驟 5/11: 移除常數列...")
+        nunique = self.df.nunique(dropna=False) # 計算唯一值數量，包括 NaN ('missing')
+        cols_to_drop = nunique[nunique <= 1].index.tolist()
+        if cols_to_drop:
+             self.df.drop(columns=cols_to_drop, inplace=True)
+             logger.info(f"移除了 {len(cols_to_drop)} 個常數特徵: {cols_to_drop}")
+        else:
+             logger.info("未發現常數特徵。")
+
+        # 6. 標籤識別與分離
+        logger.info("步驟 6/11: 識別並分離目標標籤...")
         target_col = self._identify_target_column()
-        logger.info(f"識別到目標列: '{target_col}'")
-        
-        # 提取特徵和目標
-        self.target = self.df[target_col]
-        self.features = self.df.drop(columns=[target_col])
-        
-        # 處理IP地址：提取IP地址結構特徵
-        logger.info("預處理IP地址列，保留網絡拓撲信息...")
-        self.features = self._process_ip_addresses(self.features)
-        
-        # 定義必須保留的關鍵特徵（不應被統計特徵選擇刪除）
-        preserved_columns = []
-        
-        # 保留所有IP地址衍生特徵
-        for col in self.features.columns:
-            if any(suffix in col for suffix in ['_octet', '_subnet', '_is_private', '_is_global']):
-                preserved_columns.append(col)
-        
-        # 保留重要時間特徵
-        time_features = [col for col in self.features.columns 
-                       if any(key in col.lower() for key in ['time', 'duration', 'interval'])]
-        preserved_columns.extend(time_features)
-        
-        logger.info(f"將保留 {len(preserved_columns)} 個關鍵特徵，這些特徵不會被統計特徵選擇刪除")
-        
-        # 執行基於統計的特徵選擇（只有在行數足夠多時才執行，以避免在小樣本上過度擬合）
-        if len(self.target) > 1000:
-            logger.info("執行基於統計的特徵選擇...")
-            self.features = self._perform_statistical_feature_selection(
-                self.features, self.target, exclude_cols=preserved_columns
-            )
-            logger.info(f"統計特徵選擇後的特徵形狀: {self.features.shape}")
+        if target_col not in self.df.columns:
+            raise ValueError(f"未能找到目標列 '{target_col}'，預處理中止。")
+        self.target = self.df[target_col].copy()
+        logger.info(f"目標列 '{target_col}' 已分離。")
+        # 暫不從 df 中移除目標列，後續步驟可能需要
+
+        # 7. IP 地址特徵工程
+        logger.info("步驟 7/11: 執行 IP 地址特徵工程...")
+        self.df = self._process_ip_addresses(self.df)
+        logger.info(f"IP 處理後 DataFrame 形狀: {self.df.shape}")
+        print_memory_usage("IP 地址處理後")
+
+        # 8. 提取特徵 DataFrame (現在可以移除目標列)
+        logger.info("步驟 8/11: 提取特徵 DataFrame...")
+        if target_col in self.df.columns:
+             self.features = self.df.drop(columns=[target_col]).copy()
         else:
-            logger.info("樣本數量不足，跳過統計特徵選擇")
-        
-        # 儲存特徵名稱
-        self.feature_names = list(self.features.columns)
-        
-        # 標準化數值特徵
-        num_features = self.features.select_dtypes(include=['int', 'float'])
-        if not num_features.empty:
-            # 創建副本以避免 SettingWithCopyWarning
-            self.features = self.features.copy()
-            
-            # 檢測並處理無限值和極端值 - 使用多種策略
-            num_features_cleaned = num_features.copy()
-            
-            # 儲存無效值處理的詳細信息，以便後續分析
-            invalid_value_stats = {}
-            
-            # 替換無限值和NaN - 使用進階策略
-            for col in num_features_cleaned.columns:
-                # 獲取有限值的掩碼
-                mask_inf = np.isinf(num_features_cleaned[col])
-                mask_nan = np.isnan(num_features_cleaned[col])
-                mask_large = np.abs(num_features_cleaned[col]) > 1e30  # 過大的值
-                
-                # 組合所有問題值的掩碼
-                mask_invalid = mask_inf | mask_nan | mask_large
-                invalid_count = mask_invalid.sum()
-                
-                if invalid_count > 0:
-                    # 記錄無效值統計
-                    invalid_value_stats[col] = {
-                        'total': invalid_count,
-                        'percentage': invalid_count / len(num_features_cleaned) * 100,
-                        'inf_count': mask_inf.sum(),
-                        'nan_count': mask_nan.sum(),
-                        'large_count': mask_large.sum()
-                    }
-                    
-                    # 計算有效值的中位數和平均值
-                    valid_values = num_features_cleaned.loc[~mask_invalid, col]
-                    
-                    # 檢查無效值比例
-                    invalid_ratio = invalid_count / len(num_features_cleaned)
-                    
-                    if invalid_ratio > 0.5:
-                        # 超過50%的資料是無效值 - 這可能是一個問題列
-                        logger.error(f"警告：列 '{col}' 中有 {invalid_ratio:.2%} 的值為無效值，可能指示資料品質問題")
-                        
-                        # 根據無效值的類型選擇處理策略
-                        if mask_nan.sum() / invalid_count > 0.8:
-                            # 主要是 NaN，可能是有意義的缺失值
-                            logger.info(f"列 '{col}' 主要是NaN值，考慮可能是有意義的缺失")
-                            # 使用專門的特徵值表示缺失
-                            if len(valid_values) > 0:
-                                fill_value = -999  # 特殊標記值
-                            else:
-                                fill_value = 0
-                        else:
-                            # 主要是其他類型的無效值，可能是資料錯誤
-                            if len(valid_values) > 0:
-                                # 仍然使用中位數，但記錄警告
-                                fill_value = valid_values.median()
-                            else:
-                                fill_value = 0
-                                
-                        logger.warning(f"列 '{col}' 將使用 {fill_value} 填充所有 {invalid_count} 個無效值，但建議後續分析")
-                    elif invalid_ratio > 0.2:
-                        # 20%-50%的無效值 - 考慮使用更複雜的插補方法
-                        logger.warning(f"列 '{col}' 有高比例({invalid_ratio:.2%})的無效值")
-                        
-                        if len(valid_values) > 0:
-                            # 1. 基於有效值分布的填充
-                            value_distribution = valid_values.value_counts(normalize=True)
-                            # 檢查是否具有明顯的模式/集群
-                            if len(value_distribution) > 0 and value_distribution.iloc[0] > 0.7:
-                                # 有明顯的主導值，使用最常見的值
-                                fill_value = value_distribution.index[0]
-                                logger.info(f"列 '{col}' 使用最常見值 {fill_value} 填充無效值")
-                            else:
-                                # 使用中位數填充，但考慮兩側分布
-                                fill_value = valid_values.median()
-                                logger.info(f"列 '{col}' 使用中位數 {fill_value} 填充無效值")
-                        else:
-                            fill_value = 0
-                            logger.warning(f"列 '{col}' 沒有有效值，使用 0 填充")
-                    else:
-                        # 少量無效值 - 使用中位數替換
-                        if len(valid_values) > 0:
-                            fill_value = valid_values.median()
-                            logger.info(f"列 '{col}' 使用中位數 {fill_value} 填充少量無效值")
-                        else:
-                            fill_value = 0
-                            logger.warning(f"列 '{col}' 沒有有效值，使用 0 填充")
-                    
-                    # 替換無效值
-                    num_features_cleaned.loc[mask_invalid, col] = fill_value
-                
-                # 確認是否需要處理極端值
-                treat_outliers = True
-                if col in invalid_value_stats and invalid_value_stats[col]['percentage'] > 40:
-                    # 如果有大量無效值，可能該特徵已經有問題，不必再做極端值處理
-                    logger.warning(f"列 '{col}' 由於高比例無效值，跳過極端值處理")
-                    treat_outliers = False
-                    
-                if treat_outliers:
-                    # 將值限制在合理範圍內
-                    try:
-                        # 使用IQR法則標識極端值
-                        q1 = num_features_cleaned[col].quantile(0.25)
-                        q3 = num_features_cleaned[col].quantile(0.75)
-                        iqr = q3 - q1
-                        
-                        # 使用更保守的邊界
-                        upper_limit = q3 + 3 * iqr
-                        lower_limit = q1 - 3 * iqr
-                        
-                        # 如果IQR太小，使用百分位數方法
-                        if iqr < 1e-10:
-                            upper_limit = num_features_cleaned[col].quantile(0.99)
-                            lower_limit = num_features_cleaned[col].quantile(0.01)
-                        
-                        # 處理極端值的邊界情況
-                        if upper_limit == lower_limit:
-                            # 如果上下限相同，擴大範圍
-                            if upper_limit == 0:
-                                upper_limit = 1
-                                lower_limit = -1
-                            else:
-                                upper_limit = upper_limit * 2
-                                lower_limit = lower_limit * 0.5
-                        
-                        # 計算極端值的數量
-                        outlier_mask = (num_features_cleaned[col] > upper_limit) | (num_features_cleaned[col] < lower_limit)
-                        outlier_count = outlier_mask.sum()
-                        
-                        if outlier_count > 0:
-                            # 記錄極端值處理
-                            if col not in invalid_value_stats:
-                                invalid_value_stats[col] = {}
-                            invalid_value_stats[col]['outliers'] = outlier_count
-                            invalid_value_stats[col]['outlier_percentage'] = outlier_count / len(num_features_cleaned) * 100
-                            
-                            # 截斷極端值
-                            num_features_cleaned[col] = num_features_cleaned[col].clip(lower_limit, upper_limit)
-                            logger.info(f"列 '{col}' 處理了 {outlier_count} 個極端值 ({outlier_count/len(num_features_cleaned):.2%})")
-                    except Exception as e:
-                        logger.warning(f"處理列 '{col}' 極端值時出錯: {str(e)}")
-                
-            # 如果發現了無效值，記錄詳細信息到日誌
-            if invalid_value_stats:
-                logger.warning(f"無效值處理摘要:")
-                for col, stats in invalid_value_stats.items():
-                    if 'total' in stats:
-                        logger.warning(f"  - {col}: {stats['total']} 無效值 ({stats['percentage']:.2f}%), " +
-                                       f"包括 {stats.get('inf_count', 0)} inf, {stats.get('nan_count', 0)} NaN, " +
-                                       f"{stats.get('large_count', 0)} 極大值")
-                    if 'outliers' in stats:
-                        logger.warning(f"    且 {stats['outliers']} 極端值 ({stats['outlier_percentage']:.2f}%)")
-            
-            # 標準化數值特徵
-            num_cols = num_features_cleaned.columns
-            try:
-                # 嘗試標準化
-                scaled_features = self.scaler.fit_transform(num_features_cleaned)
-                self.features[num_cols] = scaled_features
-            except Exception as e:
-                logger.error(f"標準化特徵時發生錯誤: {str(e)}")
-                # 回退策略：如果標準化失敗，使用最小最大縮放
-                for i, col in enumerate(num_cols):
-                    col_min = num_features_cleaned[col].min()
-                    col_max = num_features_cleaned[col].max()
-                    # 避免除以零
-                    if col_max > col_min:
-                        self.features[col] = (num_features_cleaned[col] - col_min) / (col_max - col_min)
-                    else:
-                        self.features[col] = 0  # 如果所有值相同，設為0
-                
-                logger.warning("使用最小最大縮放替代標準化")
-            
-        # 編碼分類目標
-        if not pd.api.types.is_numeric_dtype(self.target):
-            self.target = pd.Series(self.label_encoder.fit_transform(self.target))
-            
-        logger.info(f"預處理完成。特徵形狀: {self.features.shape}, 目標形狀: {self.target.shape}")
-        
-        # 如果啟用保存預處理資料
-        if self.save_preprocessed:
-            self._save_preprocessed_data()
-            
-        return self.features, self.target
-        
-    def split_data(self):
-        """拆分資料為訓練集和測試集"""
-        logger.info(f"拆分資料為訓練集和測試集 (測試集比例: {self.test_size})")
-        
-        # 確保特徵和目標已準備好
-        if self.features is None or self.target is None:
-            self.preprocess()
-            
-        # 使用 sklearn 進行拆分
-        X_train, X_test, y_train, y_test = train_test_split(
-            self.features, self.target,
-            test_size=self.test_size,
-            random_state=self.random_state,
-            stratify=self.target  # 分層抽樣以保持類別分佈
-        )
-        
-        # 儲存拆分結果
-        self.X_train = X_train
-        self.X_test = X_test
-        self.y_train = y_train
-        self.y_test = y_test
-        
-        logger.info(f"資料拆分完成。訓練集: {X_train.shape}, 測試集: {X_test.shape}")
-        
-        return X_train, X_test, y_train, y_test
-        
-    def get_attack_types(self):
-        """獲取攻擊類型映射"""
-        # 確保目標已編碼
-        if self.target is None:
-            self.preprocess()
-            
-        # 如果目標已經被編碼
-        if hasattr(self.label_encoder, 'classes_'):
-            attack_types = {i: name for i, name in enumerate(self.label_encoder.classes_)}
-        else:
-            # 如果目標沒有被編碼或者是數值型
-            unique_labels = sorted(self.target.unique())
-            attack_types = {label: f"Type_{label}" for label in unique_labels}
-            
-        return attack_types
-        
-    def get_sample_batch(self, batch_size=None):
-        """獲取一個批次的樣本，用於測試或即時檢測"""
-        if batch_size is None:
-            batch_size = self.batch_size
-            
-        # 確保測試集已準備好
-        if self.X_test is None or self.y_test is None:
-            self.split_data()
-            
-        # 從測試集隨機採樣
-        random_indices = np.random.choice(len(self.X_test), size=min(batch_size, len(self.X_test)), replace=False)
-        
-        batch_features = self.X_test.iloc[random_indices]
-        batch_labels = self.y_test.iloc[random_indices]
-        
-        return batch_features.values, batch_labels.values, random_indices
-        
-    def _extract_network_features(self, data_subset):
-        """從網路流量中提取有意義的特徵
-        
-        基於網路安全領域知識，從數據中提取能更好描述網路連接特徵的屬性
-        
-        Args:
-            data_subset: 包含足夠網路連接信息的DataFrame子集
-            
-        Returns:
-            pd.DataFrame: 包含提取特徵的DataFrame
-        """
-        features = {}
-        
-        # 檢測IP地址列
-        src_ip_cols = [col for col in data_subset.columns if any(term in col.lower() for term in ['src_ip', 'source_ip', 'srcip', 'src address'])]
-        dst_ip_cols = [col for col in data_subset.columns if any(term in col.lower() for term in ['dst_ip', 'dest_ip', 'dstip', 'destination_ip', 'dst address'])]
-        
-        # 檢測端口列
-        src_port_cols = [col for col in data_subset.columns if any(term in col.lower() for term in ['src_port', 'source_port', 'srcport', 'src port'])]
-        dst_port_cols = [col for col in data_subset.columns if any(term in col.lower() for term in ['dst_port', 'dest_port', 'dstport', 'destination_port', 'dst port'])]
-        
-        # 檢測協議列
-        protocol_cols = [col for col in data_subset.columns if any(term in col.lower() for term in ['proto', 'protocol', 'service'])]
-        
-        # 檢測長度/大小列
-        size_cols = [col for col in data_subset.columns if any(term in col.lower() for term in ['size', 'length', 'bytes', 'packet_len'])]
-        
-        # 檢測時間相關列
-        time_cols = [col for col in data_subset.columns if any(term in col.lower() for term in ['time', 'timestamp', 'date'])]
-        
-        # 檢測flags列
-        flag_cols = [col for col in data_subset.columns if any(term in col.lower() for term in ['flag', 'flags', 'tcp_flag'])]
-        
-        # 提取通信元組
-        if src_ip_cols and dst_ip_cols:
-            src_ip_col = src_ip_cols[0]
-            dst_ip_col = dst_ip_cols[0]
-            
-            # 通信元組: 源IP-目標IP對
-            features['ip_pairs'] = list(zip(data_subset[src_ip_col], data_subset[dst_ip_col]))
-            
-            # 如果有端口信息，增加到通信元組
-            if src_port_cols and dst_port_cols:
-                src_port_col = src_port_cols[0]
-                dst_port_col = dst_port_cols[0]
-                
-                # 完整通信五元組: 源IP+端口-目標IP+端口+協議
-                if protocol_cols:
-                    protocol_col = protocol_cols[0]
-                    features['connection_tuples'] = list(zip(
-                        data_subset[src_ip_col], data_subset[src_port_col],
-                        data_subset[dst_ip_col], data_subset[dst_port_col],
-                        data_subset[protocol_col]
-                    ))
-                else:
-                    # 四元組: 無協議信息
-                    features['connection_tuples'] = list(zip(
-                        data_subset[src_ip_col], data_subset[src_port_col],
-                        data_subset[dst_ip_col], data_subset[dst_port_col]
-                    ))
-        
-        # 提取連接時序
-        if time_cols:
-            time_col = time_cols[0]
-            features['timestamps'] = data_subset[time_col].values
-            
-            # 提取連接時間間隔
-            if len(data_subset) > 1:
-                # 確保時間格式正確
-                if pd.api.types.is_numeric_dtype(data_subset[time_col]):
-                    # 如果已經是數值型
-                    sorted_times = np.sort(data_subset[time_col].values)
-                    # 計算時間差
-                    time_diffs = np.diff(sorted_times)
-                    features['time_intervals'] = time_diffs
-                else:
-                    # 嘗試轉換為數值型
-                    try:
-                        # 轉換為日期時間
-                        datetime_series = pd.to_datetime(data_subset[time_col])
-                        # 轉換為Unix時間戳
-                        timestamp_series = datetime_series.astype('int64') // 10**9
-                        sorted_times = np.sort(timestamp_series.values)
-                        # 計算時間差
-                        time_diffs = np.diff(sorted_times)
-                        features['time_intervals'] = time_diffs
-                    except Exception as e:
-                        logger.warning(f"無法計算時間間隔: {str(e)}")
-        
-        # 提取封包大小分佈
-        if size_cols:
-            size_col = size_cols[0]
-            features['packet_sizes'] = data_subset[size_col].values
-            
-            # 計算基本統計值
-            features['mean_size'] = data_subset[size_col].mean()
-            features['std_size'] = data_subset[size_col].std()
-            features['max_size'] = data_subset[size_col].max()
-            
-        # 提取協議分佈
-        if protocol_cols:
-            protocol_col = protocol_cols[0]
-            features['protocols'] = data_subset[protocol_col].value_counts().to_dict()
-            
-        # 提取旗標信息
-        if flag_cols:
-            flag_col = flag_cols[0]
-            features['flags'] = data_subset[flag_col].value_counts().to_dict()
-            
-        return features
-    
-    def _create_network_edges(self, data_subset, max_edges=None):
-        """基於網路語義創建有意義的邊關係
-        
-        利用網路流量的結構特徵創建真實反映網路拓撲的邊關係。生成的邊基於以下關係:
-        1. 通信流：從源IP/端口到目標IP/端口的有向邊
-        2. 服務聚類：共享相同服務(協議+端口)的節點間建立邊
-        3. 時間關係：時間上接近的封包間建立邊，捕捉可能的因果關係
-        4. 行為關係：具有相似行為模式的節點間建立邊
-        
-        Args:
-            data_subset: 包含網路流量信息的DataFrame子集
-            max_edges: 最大邊數量限制
-            
-        Returns:
-            list: 邊列表，每個邊為(源節點,目標節點,時間戳,特徵)的元組
-        """
-        edges = []
-        
-        # 提取網路特徵
-        network_features = self._extract_network_features(data_subset)
-        
-        # 獲取節點數量
-        num_nodes = len(data_subset)
-        if num_nodes < 2:
-            logger.warning("節點數量不足，無法創建有意義的邊")
-            return edges
-            
-        # 1. 基於通信流創建邊 (源IP→目標IP)
-        if 'ip_pairs' in network_features:
-            ip_pairs = network_features['ip_pairs']
-            # 創建IP到索引的映射
-            unique_ips = set()
-            for src_ip, dst_ip in ip_pairs:
-                unique_ips.add(src_ip)
-                unique_ips.add(dst_ip)
-                
-            ip_to_idx = {ip: idx for idx, ip in enumerate(unique_ips)}
-            
-            # 創建通信流邊
-            timestamps = network_features.get('timestamps', [np.random.random() * 100] * len(ip_pairs))
-            
-            for i, (src_ip, dst_ip) in enumerate(ip_pairs):
-                if src_ip in ip_to_idx and dst_ip in ip_to_idx:
-                    src_idx = ip_to_idx[src_ip]
-                    dst_idx = ip_to_idx[dst_ip]
-                    
-                    # 只有源和目標不同時才創建邊
-                    if src_idx != dst_idx:
-                        # 獲取時間戳
-                        if i < len(timestamps):
-                            timestamp = timestamps[i]
-                        else:
-                            timestamp = np.random.random() * 100
-                            
-                        # 創建邊特徵：協議類型、封包大小、時間差異
-                        edge_features = []
-                        
-                        # 如果有協議信息，添加到特徵
-                        if 'protocols' in network_features:
-                            protocol_feature = next(iter(network_features['protocols'].items()))[1] / sum(network_features['protocols'].values())
-                            edge_features.append(protocol_feature)
-                        else:
-                            edge_features.append(0.5)  # 默認協議特徵
-                            
-                        # 如果有封包大小信息，添加到特徵
-                        if 'packet_sizes' in network_features and i < len(network_features['packet_sizes']):
-                            size_feature = min(1.0, network_features['packet_sizes'][i] / network_features['max_size'])
-                            edge_features.append(size_feature)
-                        else:
-                            edge_features.append(0.5)  # 默認大小特徵
-                            
-                        # 如果有時間差異信息，添加到特徵
-                        if 'time_intervals' in network_features and i < len(network_features['time_intervals']):
-                            time_diff = network_features['time_intervals'][i]
-                            # 歸一化時間差異
-                            max_interval = np.max(network_features['time_intervals'])
-                            if max_interval > 0:
-                                time_feature = min(1.0, time_diff / max_interval)
-                            else:
-                                time_feature = 0.5
-                            edge_features.append(time_feature)
-                        else:
-                            edge_features.append(0.5)  # 默認時間特徵
-                        
-                        # 添加邊
-                        edges.append((src_idx, dst_idx, timestamp, edge_features))
-                        
-            logger.info(f"基於通信流創建了 {len(edges)} 條邊")
-            
-        # 2. 基於服務聚類創建邊 (共享相同服務的節點間)
-        if 'connection_tuples' in network_features:
-            # 根據服務(端口+協議)創建聚類
-            service_to_nodes = {}
-            
-            for i, conn_tuple in enumerate(network_features['connection_tuples']):
-                # 提取服務信息
-                if len(conn_tuple) >= 5:  # 5元組
-                    src_ip, src_port, dst_ip, dst_port, protocol = conn_tuple
-                    src_service = f"{src_port}_{protocol}"
-                    dst_service = f"{dst_port}_{protocol}"
-                else:  # 4元組
-                    src_ip, src_port, dst_ip, dst_port = conn_tuple
-                    src_service = f"{src_port}"
-                    dst_service = f"{dst_port}"
-                
-                # IP到索引的映射
-                if 'ip_pairs' in network_features:
-                    ip_to_idx = {ip: idx for idx, ip in enumerate(set([p[0] for p in network_features['ip_pairs']] + [p[1] for p in network_features['ip_pairs']]))}
-                else:
-                    # 直接使用節點索引
-                    ip_to_idx = {ip: i for i, ip in enumerate(set([src_ip, dst_ip]))}
-                
-                # 添加到服務映射
-                if src_service not in service_to_nodes:
-                    service_to_nodes[src_service] = set()
-                service_to_nodes[src_service].add(ip_to_idx[src_ip])
-                
-                if dst_service not in service_to_nodes:
-                    service_to_nodes[dst_service] = set()
-                service_to_nodes[dst_service].add(ip_to_idx[dst_ip])
-            
-            # 為每個服務聚類創建邊
-            service_edges_count = 0
-            for service, nodes in service_to_nodes.items():
-                nodes_list = list(nodes)
-                # 如果服務至少有2個節點
-                if len(nodes_list) >= 2:
-                    # 隨機選擇一個中心節點
-                    center_node = np.random.choice(nodes_list)
-                    
-                    # 從中心節點連接到其他節點
-                    for node in nodes_list:
-                        if node != center_node:
-                            # 使用服務相關的隨機時間戳
-                            timestamp = np.random.random() * 100
-                            # 創建邊特徵：服務類型
-                            edge_features = [0.7, 0.5, 0.5]  # 服務邊的特徵與通信流邊區分
-                            
-                            edges.append((center_node, node, timestamp, edge_features))
-                            service_edges_count += 1
-                            
-                            # 檢查是否達到最大邊數
-                            if max_edges is not None and len(edges) >= max_edges:
-                                logger.info(f"達到最大邊數限制: {max_edges}")
-                                return edges
-            
-            logger.info(f"基於服務聚類創建了 {service_edges_count} 條邊")
-            
-        # 3. 基於時間關係創建邊
-        if 'timestamps' in network_features and len(network_features['timestamps']) > 1:
-            # 對時間戳進行排序並獲取索引
-            sorted_time_indices = np.argsort(network_features['timestamps'])
-            
-            # 時間窗口大小 - 可以根據數據特性調整
-            time_window_size = np.percentile(network_features.get('time_intervals', [1.0]), 25)  # 使用第一四分位數作為窗口大小
-            if time_window_size <= 0:
-                time_window_size = 1.0  # 最小窗口大小
-                
-            # 創建時間窗口內的連接
-            time_edges_count = 0
-            for i in range(1, len(sorted_time_indices)):
-                curr_idx = sorted_time_indices[i]
-                prev_idx = sorted_time_indices[i-1]
-                
-                # 檢查時間差是否在窗口內
-                curr_time = network_features['timestamps'][curr_idx]
-                prev_time = network_features['timestamps'][prev_idx]
-                time_diff = abs(curr_time - prev_time)
-                
-                if time_diff <= time_window_size:
-                    # 創建時間關係邊
-                    timestamp = curr_time
-                    # 創建邊特徵：時間接近度
-                    proximity = 1.0 - (time_diff / time_window_size)
-                    edge_features = [0.3, 0.3, proximity]
-                    
-                    edges.append((prev_idx, curr_idx, timestamp, edge_features))
-                    time_edges_count += 1
-                    
-                    # 檢查是否達到最大邊數
-                    if max_edges is not None and len(edges) >= max_edges:
-                        logger.info(f"達到最大邊數限制: {max_edges}")
-                        return edges
-            
-            logger.info(f"基於時間關係創建了 {time_edges_count} 條邊")
-        
-        # 補充: 如果邊數量不足，添加一些行為關係邊
-        if max_edges is not None and len(edges) < max_edges:
-            # 計算需要添加的邊數量
-            additional_edges_needed = max_edges - len(edges)
-            
-            # 只有在節點數足夠且需要添加邊時才執行
-            if additional_edges_needed > 0 and num_nodes > 3:
-                behavior_edges_count = 0
-                
-                # 基於節點特性創建行為關係邊
-                if isinstance(data_subset, pd.DataFrame) and data_subset.shape[1] > 2:
-                    # 選擇數值型特徵列
-                    num_cols = data_subset.select_dtypes(include=['number']).columns
-                    
-                    if len(num_cols) > 0:
-                        # 選擇一部分特徵列
-                        selected_cols = np.random.choice(num_cols, min(5, len(num_cols)), replace=False)
-                        
-                        # 計算所選特徵的聚類
-                        try:
-                            from sklearn.cluster import KMeans
-                            
-                            # 提取特徵矩陣
-                            feature_matrix = data_subset[selected_cols].values
-                            
-                            # 處理缺失值
-                            feature_matrix = np.nan_to_num(feature_matrix)
-                            
-                            # 確定聚類數
-                            n_clusters = min(5, num_nodes // 2)
-                            if n_clusters > 1:
-                                # 執行KMeans聚類
-                                kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
-                                clusters = kmeans.fit_predict(feature_matrix)
-                                
-                                # 根據聚類結果創建邊
-                                for cluster_id in range(n_clusters):
-                                    # 獲取屬於該聚類的節點
-                                    cluster_nodes = np.where(clusters == cluster_id)[0]
-                                    
-                                    if len(cluster_nodes) > 1:
-                                        # 選擇聚類中心
-                                        try:
-                                            # 找到離聚類中心最近的點
-                                            distances = kmeans.transform(feature_matrix[cluster_nodes])
-                                            center_idx = cluster_nodes[np.argmin(distances[:, cluster_id])]
-                                        except:
-                                            # 如果失敗，隨機選取
-                                            center_idx = np.random.choice(cluster_nodes)
-                                        
-                                        # 從中心連接到聚類的其他節點
-                                        for node_idx in cluster_nodes:
-                                            if node_idx != center_idx:
-                                                # 使用隨機時間戳
-                                                timestamp = np.random.random() * 100
-                                                # 創建邊特徵：聚類信息
-                                                edge_features = [0.2, 0.8, 0.4]  # 行為邊的特徵與其他邊區分
-                                                
-                                                edges.append((center_idx, node_idx, timestamp, edge_features))
-                                                behavior_edges_count += 1
-                                                
-                                                # 檢查是否已添加足夠多的邊
-                                                if behavior_edges_count >= additional_edges_needed:
-                                                    break
-                                        
-                                        if behavior_edges_count >= additional_edges_needed:
-                                            break
-                        except Exception as e:
-                            logger.warning(f"創建行為關係邊時出錯: {str(e)}")
-                
-                logger.info(f"基於行為關係創建了 {behavior_edges_count} 條補充邊")
-        
-        # 如果邊列表為空，回退到隨機邊生成
-        if not edges and max_edges is not None:
-            logger.warning("無法基於網路語義創建邊，回退到隨機邊生成")
-            
-            # 生成隨機邊
-            for _ in range(min(max_edges, num_nodes * 5)):
-                src = np.random.randint(0, num_nodes)
-                dst = np.random.randint(0, num_nodes)
-                
-                # 避免自環
-                while dst == src:
-                    dst = np.random.randint(0, num_nodes)
-                    
-                # 生成隨機時間戳和特徵
-                timestamp = np.random.random() * 100
-                edge_feat = [np.random.random() for _ in range(3)]
-                
-                edges.append((src, dst, timestamp, edge_feat))
-                
-            logger.info(f"隨機生成了 {len(edges)} 條邊")
-        
-        return edges
-    
-    def get_temporal_edges(self, max_edges=None):
-        """獲取時間性邊 - 基於網路流量語義生成更合理的邊關係"""
-        logger.info("基於網路流量語義生成圖邊...")
-        
-        # 確保特徵已準備好
-        if self.features is None:
-            self.preprocess()
-            
-        # 檢查是否有足夠的數據
-        if len(self.features) < 2:
-            logger.warning("數據點不足，無法創建有意義的邊")
-            return []
-            
-        # 使用網路流量語義創建邊
-        edges = self._create_network_edges(self.features, max_edges)
-        
-        logger.info(f"總共生成 {len(edges)} 條基於網路語義的邊")
-        return edges
-        
-    def _check_preprocessed_exists(self):
-        """檢查預處理資料是否存在"""
-        feature_path = os.path.join(self.preprocessed_path, 'features.parquet')
-        feature_csv_path = os.path.join(self.preprocessed_path, 'features.csv')
-        target_path = os.path.join(self.preprocessed_path, 'target.parquet')
-        target_csv_path = os.path.join(self.preprocessed_path, 'target.csv')
-        
-        # 檢查 parquet 或 csv 格式檔案是否存在
-        features_exist = os.path.exists(feature_path) or os.path.exists(feature_csv_path)
-        target_exist = os.path.exists(target_path) or os.path.exists(target_csv_path)
-        
-        return features_exist and target_exist
-        
-    def _save_preprocessed_data(self):
-        """保存預處理後的資料，使用原子操作和狀態追蹤確保一致性"""
-        import json
-        import tempfile
-        import shutil
-        import h5py
-        
-        # 設置臨時處理目錄
-        temp_dir = tempfile.mkdtemp(prefix="tgat_preprocessing_")
-        logger.info(f"使用臨時目錄進行原子儲存: {temp_dir}")
-        
+             self.features = self.df.copy() # 如果目標列已被移除
+             logger.warning(f"目標列 '{target_col}' 在提取特徵前不存在，請檢查 IP 處理邏輯。")
+
+        # 9. 標籤編碼
+        logger.info("步驟 9/11: 對目標標籤進行編碼...")
         try:
-            # 建立最終目標目錄 (如果不存在)
-            if not os.path.exists(self.preprocessed_path):
-                os.makedirs(self.preprocessed_path)
-                
-            # 建立分片目錄
-            features_dir = os.path.join(temp_dir, 'features_chunks')
-            os.makedirs(features_dir)
-            
-            # 創建一個淺拷貝用於保存，避免修改原始資料
-            logger.info("準備保存預處理資料 (使用分片儲存策略)...")
-            
-            # 創建檢查點檔案路徑與其他必要的檔案
-            checkpoint_path = os.path.join(temp_dir, 'checkpoint.json')
-            manifest_path = os.path.join(temp_dir, 'manifest.json')
-            preprocessing_state_path = os.path.join(temp_dir, 'preprocessing_state.h5')
-            
-            # 檢查是否已存在處理檢查點
-            current_chunk = 0
-            if os.path.exists(os.path.join(self.preprocessed_path, 'manifest.json')):
-                try:
-                    with open(os.path.join(self.preprocessed_path, 'manifest.json'), 'r') as f:
-                        existing_manifest = json.load(f)
-                        if existing_manifest.get('status') == 'processing':
-                            current_chunk = existing_manifest.get('current_chunk', 0)
-                            logger.info(f"發現未完成的處理，將從分塊 {current_chunk} 繼續")
-                except Exception as e:
-                    logger.warning(f"讀取現有manifest文件失敗: {str(e)}，將從頭開始處理")
-                    current_chunk = 0
-            
-            # 分塊保存策略，避免記憶體溢出
-            chunk_size = 500000  # 減小每個分塊的行數，避免後續讀取時的記憶體問題
-            total_rows = len(self.features)
-            chunks = list(range(0, total_rows, chunk_size)) + [total_rows]
-            total_chunks = len(chunks) - 1
-            logger.info(f"將分 {total_chunks} 批次保存 {total_rows} 筆資料，從第 {current_chunk} 批次開始")
-            
-            # 特別處理IP地址和其他大量唯一值的欄位
-            ip_cols = [col for col in self.features.columns if 'IP' in col or 'HTTP' in col or 'Simillar' in col]
-            if ip_cols:
-                logger.info(f"檢測到可能包含大量唯一值的欄位: {ip_cols}")
-            
-            # 先儲存小型資料 (目標變數、縮放器、編碼器) 到 HDF5 容器
-            logger.info(f"儲存預處理狀態到統一的 HDF5 容器: {preprocessing_state_path}")
-            with h5py.File(preprocessing_state_path, 'w') as f:
-                # 儲存基本元數據
-                metadata_group = f.create_group('metadata')
-                metadata_group.attrs['timestamp'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S") 
-                metadata_group.attrs['total_rows'] = total_rows
-                metadata_group.attrs['chunk_size'] = chunk_size
-                metadata_group.attrs['total_chunks'] = total_chunks
-                
-                # 儲存特徵欄位資訊
-                columns = list(self.features.columns)
-                dtypes = {col: str(self.features[col].dtype) for col in columns}
-                column_group = metadata_group.create_group('columns')
-                for i, col in enumerate(columns):
-                    column_group.attrs[f'col_{i}'] = col
-                dtype_group = metadata_group.create_group('dtypes')
-                for col, dtype in dtypes.items():
-                    dtype_group.attrs[col] = dtype
-                
-                # 儲存高基數列資訊
-                high_card_group = metadata_group.create_group('high_cardinality')
-                for i, col in enumerate(ip_cols):
-                    high_card_group.attrs[f'col_{i}'] = col
-                
-                # 儲存目標變數 (通常體積較小)
-                target_dataset = f.create_dataset('target', data=self.target.values)
-                
-                # 儲存 scaler 和 encoder 的簡化參數 (只儲存關鍵屬性)
-                scaler_group = f.create_group('scaler')
-                if hasattr(self.scaler, 'mean_'):
-                    scaler_group.create_dataset('mean', data=self.scaler.mean_)
-                if hasattr(self.scaler, 'scale_'):
-                    scaler_group.create_dataset('scale', data=self.scaler.scale_)
-                if hasattr(self.scaler, 'var_'):
-                    scaler_group.create_dataset('var', data=self.scaler.var_)
-                    
-                encoder_group = f.create_group('encoder')
-                if hasattr(self.label_encoder, 'classes_'):
-                    # 儲存類別標籤
-                    classes = self.label_encoder.classes_
-                    encoder_group.create_dataset('classes', data=np.array([str(c) for c in classes], dtype='S'))
-                    
-            # 同時儲存傳統的 pickle 格式預處理工具作為備份
-            with open(os.path.join(temp_dir, 'scaler.pkl'), 'wb') as f:
-                pickle.dump(self.scaler, f)
-                
-            with open(os.path.join(temp_dir, 'label_encoder.pkl'), 'wb') as f:
-                pickle.dump(self.label_encoder, f)
-                
-            # 創建處理清單，追蹤所有文件
-            manifest = {
-                'version': '1.0',
-                'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                'status': 'processing',
-                'total_chunks': total_chunks,
-                'current_chunk': current_chunk,
-                'files': {
-                    'state': os.path.basename(preprocessing_state_path),
-                    'scaler': 'scaler.pkl',
-                    'encoder': 'label_encoder.pkl',
-                    'chunks': []
-                }
-            }
-            
-            # 開始分塊保存特徵資料 - 每個分塊儲存為獨立檔案
-            for i in range(current_chunk, total_chunks):
-                start_idx = chunks[i]
-                end_idx = chunks[i+1]
-                
-                try:
-                    # 定義此分塊的檔案路徑
-                    chunk_filename = f'chunk_{i:05d}.parquet'
-                    chunk_path = os.path.join(features_dir, chunk_filename)
-                    
-                    # 取出當前分塊
-                    chunk = self.features.iloc[start_idx:end_idx].copy()
-                    
-                    # 針對類別列的特殊處理，避免記憶體暴增
-                    for col in chunk.select_dtypes(include=['category']).columns:
-                        if col in ip_cols:
-                            # 對於 IP 地址或大量唯一值的列，使用較節省記憶體的方法
-                            logger.info(f"使用記憶體優化方法處理大量唯一值欄位: '{col}'")
-                            # 維持原始編碼，不轉字串
-                            pass
-                        else:
-                            # 其他類別列可以安全地轉換為字串
-                            try:
-                                chunk[col] = chunk[col].astype(str)
-                            except Exception as e:
-                                logger.warning(f"轉換列 '{col}' 失敗: {str(e)}，保持原狀")
-                    
-                    # 儲存為獨立的 Parquet 檔案
-                    if POLARS_AVAILABLE:
-                        # 使用 Polars 高效保存 Parquet (更節省記憶體)
-                        pl.from_pandas(chunk).write_parquet(chunk_path)
-                    else:
-                        # 回退到 Pandas
-                        chunk.to_parquet(chunk_path, index=False)
-                        
-                    logger.info(f"已保存分塊 {i+1}/{total_chunks} 至獨立檔案: {chunk_path}")
-                    
-                    # 將此分塊添加到manifest
-                    manifest['files']['chunks'].append(f'features_chunks/{chunk_filename}')
-                    manifest['current_chunk'] = i + 1
-                    
-                    # 更新清單
-                    with open(manifest_path, 'w') as f:
-                        json.dump(manifest, f, indent=2)
-                    
-                    # 更新檢查點
-                    with open(checkpoint_path, 'w') as f:
-                        json.dump({
-                            'current_chunk': i + 1,
-                            'total_chunks': total_chunks,
-                            'last_processed_row': end_idx,
-                            'total_rows': total_rows,
-                            'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                        }, f)
-                        
-                    logger.info(f"已更新檢查點: 批次 {i+1}/{total_chunks}")
-                    
-                    # 強制釋放記憶體
-                    del chunk
-                    gc.collect()
-                    print_memory_usage()
-                    
-                except Exception as e:
-                    logger.error(f"處理分塊 {i+1} 時發生錯誤: {str(e)}")
-                    
-                    # 仍然更新清單，但標記處理狀態
-                    manifest['status'] = 'incomplete'
-                    with open(manifest_path, 'w') as f:
-                        json.dump(manifest, f, indent=2)
-                        
-                    # 複製已完成的工作到目標目錄，以便後續恢復
-                    try:
-                        target_manifest_path = os.path.join(self.preprocessed_path, 'manifest.json')
-                        shutil.copy2(manifest_path, target_manifest_path)
-                        logger.info(f"保存中間狀態清單到: {target_manifest_path}")
-                    except Exception as copy_err:
-                        logger.warning(f"複製清單文件失敗: {str(copy_err)}")
-                        
-                    raise  # 重新引發異常
-            
-            # 全部處理完成，更新狀態
-            manifest['status'] = 'complete'
-            with open(manifest_path, 'w') as f:
-                json.dump(manifest, f, indent=2)
-                
-            # 現在一次性將所有文件移動到目標目錄 (原子操作)
-            logger.info(f"所有處理完成，執行原子的目錄切換操作")
-            
-            # 先備份舊目錄 (如果存在)
-            if os.path.exists(self.preprocessed_path):
-                backup_dir = f"{self.preprocessed_path}_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-                logger.info(f"備份現有處理目錄: {self.preprocessed_path} -> {backup_dir}")
-                try:
-                    # 將現有目錄移動為備份
-                    shutil.move(self.preprocessed_path, backup_dir)
-                except Exception as e:
-                    # 如果無法移動，則跳過，將直接覆蓋
-                    logger.warning(f"備份現有目錄失敗: {str(e)}，將直接覆蓋")
-                    
-            # 創建新的目標目錄
-            os.makedirs(self.preprocessed_path, exist_ok=True)
-            
-            # 一次性複製所有文件
-            for root, dirs, files in os.walk(temp_dir):
-                for file in files:
-                    src_path = os.path.join(root, file)
-                    # 計算相對路徑
-                    rel_path = os.path.relpath(src_path, temp_dir)
-                    dst_path = os.path.join(self.preprocessed_path, rel_path)
-                    
-                    # 確保目標目錄存在
-                    os.makedirs(os.path.dirname(dst_path), exist_ok=True)
-                    
-                    # 複製文件
-                    shutil.copy2(src_path, dst_path)
-                    
-            logger.info(f"預處理資料已全部保存至: {self.preprocessed_path}")
-            logger.info("保存過程已完成，使用原子操作確保一致性")
-                
-        except Exception as e:
-            logger.error(f"保存預處理資料時發生錯誤: {str(e)}")
-            raise
-        finally:
-            # 清理臨時目錄
-            try:
-                shutil.rmtree(temp_dir)
-                logger.info(f"已清理臨時目錄: {temp_dir}")
-            except Exception as e:
-                logger.warning(f"清理臨時目錄失敗: {str(e)}")
-        
-    def _load_preprocessed_data(self):
-        """載入預處理後的資料，支援分片文件和嘗試恢復任何缺少的預處理工具"""
-        # 檢查必要的檔案路徑
-        features_dir = os.path.join(self.preprocessed_path, 'features_chunks')
-        target_csv_path = os.path.join(self.preprocessed_path, 'target.csv')
-        target_path = os.path.join(self.preprocessed_path, 'target.parquet')
-        metadata_path = os.path.join(self.preprocessed_path, 'features_metadata.json')
-        scaler_path = os.path.join(self.preprocessed_path, 'scaler.pkl')
-        encoder_path = os.path.join(self.preprocessed_path, 'label_encoder.pkl')
-        
-        # 追蹤加載進度
-        features_loaded = False
-        target_loaded = False
-        scaler_loaded = False
-        encoder_loaded = False
-        
-        # 首先檢查是否使用分片儲存
-        if os.path.exists(features_dir) and os.path.isdir(features_dir):
-            try:
-                logger.info(f"檢測到分片文件目錄，將使用分片載入: {features_dir}")
-                
-                # 檢查元數據是否存在
-                if os.path.exists(metadata_path):
-                    import json
-                    with open(metadata_path, 'r') as f:
-                        metadata = json.load(f)
-                    
-                    logger.info(f"載入特徵元數據: {metadata_path}")
-                    logger.info(f"特徵總數: {len(metadata['columns'])}, 總行數: {metadata['total_rows']}, 分片數: {metadata['total_chunks']}")
-                    
-                    # 獲取所有分片文件
-                    chunk_files = sorted(glob.glob(os.path.join(features_dir, 'chunk_*.parquet')))
-                    
-                    if not chunk_files:
-                        logger.warning("未找到任何特徵分片文件")
-                        return False
-                    
-                    logger.info(f"找到 {len(chunk_files)} 個特徵分片文件")
-                    
-                    # 使用Polars高效載入分片 (如果可用)
-                    if POLARS_AVAILABLE:
-                        logger.info("使用Polars高效載入分片")
-                        dfs = []
-                        
-                        # 逐個載入分片
-                        for i, chunk_file in enumerate(tqdm(chunk_files, desc="載入分片")):
-                            try:
-                                # 使用Polars讀取
-                                chunk_df = pl.read_parquet(chunk_file)
-                                dfs.append(chunk_df)
-                                
-                                # 定期合併以節省記憶體
-                                if (i + 1) % 5 == 0 or i == len(chunk_files) - 1:
-                                    logger.info(f"合併已載入的 {len(dfs)} 個分片")
-                                    combined_df = pl.concat(dfs)
-                                    
-                                    # 如果是第一批，直接賦值
-                                    if not hasattr(self, '_polars_features') or self._polars_features is None:
-                                        self._polars_features = combined_df
-                                    else:
-                                        # 否則追加
-                                        self._polars_features = pl.concat([self._polars_features, combined_df])
-                                    
-                                    # 釋放記憶體
-                                    dfs = []
-                                    del combined_df
-                                    gc.collect()
-                                    print_memory_usage()
-                            except Exception as e:
-                                logger.error(f"載入分片 {chunk_file} 失敗: {str(e)}")
-                        
-                        # 將Polars DataFrame轉換為Pandas
-                        if hasattr(self, '_polars_features') and self._polars_features is not None:
-                            logger.info("將Polars特徵轉換為Pandas DataFrame")
-                            self.features = self._polars_features.to_pandas()
-                            del self._polars_features
-                            gc.collect()
-                            features_loaded = True
-                    else:
-                        # 使用Pandas逐個載入分片
-                        logger.info("使用Pandas載入分片")
-                        dfs = []
-                        
-                        # 逐個載入分片
-                        for i, chunk_file in enumerate(tqdm(chunk_files, desc="載入分片")):
-                            try:
-                                # 使用Pandas讀取
-                                chunk_df = pd.read_parquet(chunk_file)
-                                dfs.append(chunk_df)
-                                
-                                # 定期合併以節省記憶體
-                                if (i + 1) % 5 == 0 or i == len(chunk_files) - 1:
-                                    logger.info(f"合併已載入的 {len(dfs)} 個分片")
-                                    if not hasattr(self, 'features') or self.features is None:
-                                        self.features = pd.concat(dfs, ignore_index=True)
-                                    else:
-                                        self.features = pd.concat([self.features] + dfs, ignore_index=True)
-                                    
-                                    # 釋放記憶體
-                                    dfs = []
-                                    gc.collect()
-                                    print_memory_usage()
-                            except Exception as e:
-                                logger.error(f"載入分片 {chunk_file} 失敗: {str(e)}")
-                        
-                        if hasattr(self, 'features') and self.features is not None:
-                            features_loaded = True
-                else:
-                    logger.warning(f"未找到特徵元數據文件: {metadata_path}")
-            except Exception as e:
-                logger.error(f"分片載入過程中發生錯誤: {str(e)}")
-        else:
-            # 嘗試載入傳統的單一文件特徵
-            try:
-                feature_path = os.path.join(self.preprocessed_path, 'features.parquet')
-                feature_csv_path = os.path.join(self.preprocessed_path, 'features.csv')
-                
-                if os.path.exists(feature_path):
-                    self.features = pd.read_parquet(feature_path)
-                    logger.info(f"從Parquet格式載入特徵: {feature_path}")
-                    features_loaded = True
-                elif os.path.exists(feature_csv_path):
-                    self.features = pd.read_csv(feature_csv_path)
-                    logger.info(f"從CSV格式載入特徵: {feature_csv_path}")
-                    features_loaded = True
-                else:
-                    logger.warning("未找到特徵資料文件")
-            except Exception as e:
-                logger.warning(f"載入特徵資料時出錯: {str(e)}")
-            
-        # 嘗試載入目標數據
-        try:
-            if os.path.exists(target_path):
-                target_df = pd.read_parquet(target_path)
-                logger.info(f"從Parquet格式載入目標: {target_path}")
-                self.target = target_df['target']
-                target_loaded = True
-            elif os.path.exists(target_csv_path):
-                target_df = pd.read_csv(target_csv_path)
-                logger.info(f"從CSV格式載入目標: {target_csv_path}")
-                self.target = target_df['target']
-                target_loaded = True
+            # 確保標籤是整數且從 0 開始
+            if not pd.api.types.is_numeric_dtype(self.target) or self.target.min() < 0:
+                 self.target = pd.Series(self.label_encoder.fit_transform(self.target.astype(str)), index=self.target.index)
+                 logger.info("標籤已使用 LabelEncoder 編碼。")
+                 logger.info(f"類別映射: {dict(zip(self.label_encoder.classes_, self.label_encoder.transform(self.label_encoder.classes_)))}")
             else:
-                logger.warning("未找到目標資料文件")
+                 # 檢查是否從 0 開始連續
+                 unique_labels = sorted(self.target.unique())
+                 if unique_labels[0] != 0 or not all(unique_labels[i] == i for i in range(len(unique_labels))):
+                      logger.warning("數值標籤不是從0開始的連續整數，重新編碼。")
+                      self.target = pd.Series(self.label_encoder.fit_transform(self.target), index=self.target.index)
+                      logger.info(f"標籤重新編碼完成。類別映射: {dict(zip(self.label_encoder.classes_, self.label_encoder.transform(self.label_encoder.classes_)))}")
+                 else:
+                      logger.info("目標標籤已是從0開始的連續數值類型，無需編碼。")
+            # 確保是整數類型
+            self.target = self.target.astype(int)
         except Exception as e:
-            logger.warning(f"載入目標資料時出錯: {str(e)}")
-            
-        # 如果特徵和目標都成功載入，則繼續處理
-        if features_loaded and target_loaded:
-            # 儲存特徵名稱
-            self.feature_names = list(self.features.columns)
-            
-            # 嘗試載入縮放器
-            try:
-                if os.path.exists(scaler_path):
-                    with open(scaler_path, 'rb') as f:
-                        self.scaler = pickle.load(f)
-                    logger.info(f"成功載入縮放器: {scaler_path}")
-                    scaler_loaded = True
-                else:
-                    logger.warning(f"找不到縮放器文件: {scaler_path}，將重新建立")
-            except Exception as e:
-                logger.warning(f"載入縮放器時出錯: {str(e)}，將重新建立")
-                
-            # 嘗試載入標籤編碼器
-            try:
-                if os.path.exists(encoder_path):
-                    with open(encoder_path, 'rb') as f:
-                        self.label_encoder = pickle.load(f)
-                    logger.info(f"成功載入標籤編碼器: {encoder_path}")
-                    encoder_loaded = True
-                else:
-                    logger.warning(f"找不到標籤編碼器文件: {encoder_path}，將重新建立")
-            except Exception as e:
-                logger.warning(f"載入標籤編碼器時出錯: {str(e)}，將重新建立")
-            
-            # 如果缺少縮放器，創建一個默認的而不是嘗試從所有數據重建（節省記憶體）
-            if not scaler_loaded:
-                try:
-                    logger.info("創建默認縮放器（避免記憶體密集型重建）...")
-                    # 直接創建標準縮放器，無需在全數據集上訓練
-                    self.scaler = StandardScaler()
-                    # 將mean_和scale_設定為合理的默認值
-                    # 註：這裡假設數據已經被標準化過，所以使用簡單的标识转换
-                    # 由於數據已經標準化，所以我們可以設置mean_=0, scale_=1
-                    
-                    # 簡單檢查特徵中的数值列
-                    num_cols = self.features.select_dtypes(include=['int', 'float']).columns
-                    
-                    if len(num_cols) > 0:
-                        logger.info(f"檢測到 {len(num_cols)} 個數值特徵欄位，為縮放器設置默認參數")
-                        # 創建並初始化標準化器參數
-                        self.scaler.mean_ = np.zeros(len(num_cols))
-                        self.scaler.scale_ = np.ones(len(num_cols))
-                        self.scaler.var_ = np.ones(len(num_cols))
-                        self.scaler.n_features_in_ = len(num_cols)
-                        self.scaler.n_samples_seen_ = 1
-                        self.scaler.feature_names_in_ = np.array(num_cols)
-                    
-                    logger.info("成功創建默認縮放器")
-                    
-                    # 保存默認縮放器
-                    with open(scaler_path, 'wb') as f:
-                        pickle.dump(self.scaler, f)
-                    logger.info(f"默認縮放器已保存至: {scaler_path}")
-                except Exception as e:
-                    logger.warning(f"創建默認縮放器時出錯: {str(e)}")
-                    # 創建最簡單的縮放器物件，不設置任何參數
-                    self.scaler = StandardScaler()
-            
-            # 如果缺少編碼器，嘗試從數據重建
-            if not encoder_loaded:
-                try:
-                    logger.info("從載入的數據重建標籤編碼器...")
-                    if isinstance(self.target, pd.Series):
-                        self.label_encoder = LabelEncoder()
-                        # 如果目標已經是數值型，只需創建一個簡單的映射
-                        if pd.api.types.is_numeric_dtype(self.target):
-                            unique_values = sorted(self.target.unique())
-                            self.label_encoder.classes_ = np.array(unique_values)
-                        else:
-                            # 否則重新編碼
-                            self.label_encoder.fit(self.target)
-                        logger.info("成功從現有數據重建標籤編碼器")
-                        # 保存重建的編碼器
-                        with open(encoder_path, 'wb') as f:
-                            pickle.dump(self.label_encoder, f)
-                        logger.info(f"重建的標籤編碼器已保存至: {encoder_path}")
-                    else:
-                        logger.warning("無法重建標籤編碼器：目標變數格式不正確")
-                except Exception as e:
-                    logger.warning(f"重建標籤編碼器時出錯: {str(e)}")
-            
-            logger.info(f"預處理資料載入完成: 特徵形狀={self.features.shape}, 目標形狀={self.target.shape}")
-            logger.info(f"加載狀態: 特徵={features_loaded}, 目標={target_loaded}, 縮放器={scaler_loaded}, 編碼器={encoder_loaded}")
-            return True
+             logger.error(f"標籤編碼失敗: {e}", exc_info=True)
+             raise
+
+        # 10. 統計特徵選擇
+        logger.info("步驟 10/11: 執行統計特徵選擇...")
+        # 定義需要保留的關鍵列 (IP衍生的、時間相關的)
+        preserved_columns = [col for col in self.features.columns if '_octet' in col or '_subnet' in col or '_is_private' in col or '_is_global' in col or 'time' in col.lower() or 'duration' in col.lower()]
+        self.features = self._perform_statistical_feature_selection(
+            self.features, self.target, exclude_cols=preserved_columns
+        )
+        self.feature_names = list(self.features.columns) # 更新特徵名稱列表
+        logger.info(f"特徵選擇後形狀: {self.features.shape}")
+        print_memory_usage("特徵選擇後")
+
+        # 11. 處理剩餘非數值特徵並標準化
+        logger.info("步驟 11/11: 處理剩餘類別特徵並進行標準化...")
+        numeric_cols_final = []
+        category_cols_final = []
+        cols_to_drop_final = []
+
+        for col in self.features.columns:
+             if pd.api.types.is_numeric_dtype(self.features[col]):
+                  numeric_cols_final.append(col)
+             # 嘗試將 object/category 轉換為數值 (標籤編碼)
+             elif pd.api.types.is_object_dtype(self.features[col]) or pd.api.types.is_categorical_dtype(self.features[col]):
+                  try:
+                       # 使用 factorize 進行標籤編碼，它能處理 'missing' 值
+                       codes, _ = pd.factorize(self.features[col])
+                       self.features[col] = codes
+                       numeric_cols_final.append(col) # 編碼後視為數值
+                       logger.debug(f"分類特徵 '{col}' 已進行標籤編碼。")
+                  except Exception as e:
+                       logger.warning(f"無法對分類特徵 '{col}' 進行標籤編碼: {e}。將移除此列。")
+                       cols_to_drop_final.append(col)
+             else:
+                  logger.warning(f"發現未知類型的特徵 '{col}' ({self.features[col].dtype})，將移除此列。")
+                  cols_to_drop_final.append(col)
+
+        # 移除轉換失敗或未知類型的列
+        if cols_to_drop_final:
+             self.features.drop(columns=cols_to_drop_final, inplace=True)
+             logger.info(f"移除了 {len(cols_to_drop_final)} 個無法處理的特徵: {cols_to_drop_final}")
+             self.feature_names = list(self.features.columns) # 再次更新特徵名稱
+
+        # --- 標準化所有數值特徵 ---
+        if numeric_cols_final:
+             # 從 numeric_cols_final 中移除已刪除的列
+             numeric_cols_to_scale = [col for col in numeric_cols_final if col in self.features.columns]
+             if numeric_cols_to_scale:
+                  logger.info(f"對 {len(numeric_cols_to_scale)} 個數值特徵進行標準化...")
+                  try:
+                       # 再次確保沒有 NaN/Inf (雖然前面處理過，但以防萬一)
+                       features_numeric = self.features[numeric_cols_to_scale].values.astype(np.float64) # 使用 float64 提高精度
+                       if np.any(np.isnan(features_numeric)) or np.any(np.isinf(features_numeric)):
+                            logger.warning("標準化前再次發現 NaN/Inf，使用 0 填充。")
+                            features_numeric = np.nan_to_num(features_numeric, nan=0.0, posinf=0.0, neginf=0.0)
+
+                       self.features[numeric_cols_to_scale] = self.scaler.fit_transform(features_numeric)
+                       logger.info("數值特徵標準化完成。")
+                  except Exception as e:
+                       logger.error(f"標準化特徵時發生錯誤: {e}", exc_info=True)
+                       raise # 拋出錯誤以停止執行
+             else:
+                  logger.warning("沒有剩餘的數值特徵需要標準化。")
         else:
-            # 如果關鍵數據沒有成功載入，則返回失敗
-            missing = []
-            if not features_loaded: missing.append("特徵")
-            if not target_loaded: missing.append("目標")
-            logger.error(f"預處理資料載入失敗：缺少必要的數據文件 ({', '.join(missing)})")
+             logger.warning("最終數據中沒有數值特徵進行標準化。")
+
+        logger.info(f"預處理最終完成。特徵形狀: {self.features.shape}, 目標形狀: {self.target.shape}")
+        print_memory_usage("標準化後")
+
+        # --- 驗證行數一致性 ---
+        if len(self.features) != len(self.target):
+             raise ValueError(f"預處理後特徵和目標的行數不匹配: {len(self.features)} vs {len(self.target)}")
+
+        # --- 轉換為最終的 NumPy Array ---
+        logger.info("將特徵和目標轉換為 NumPy Arrays...")
+        final_features_np = self.features.values.astype(np.float32) # 模型通常使用 float32
+        final_target_np = self.target.values.astype(int) # 標籤是整數
+
+        # 更新類別屬性
+        self.features = final_features_np
+        self.target = final_target_np
+
+        # --- 保存預處理資料 ---
+        if self.save_preprocessed:
+            logger.info("保存預處理後的數據...")
+            self._save_preprocessed_data()
+
+        # --- 釋放記憶體 ---
+        logger.info("釋放原始 DataFrame 記憶體...")
+        self.df = None
+        if self.aggressive_gc: clean_memory(aggressive=True)
+        logger.info("預處理流程結束。")
+        print_memory_usage("預處理結束")
+        logger.info("=" * 50)
+
+        return self.features, self.target # 返回 NumPy Arrays
+
+
+    def _save_preprocessed_data(self):
+        """保存預處理後的資料 (Numpy + Pickle)"""
+        if self.features is None or self.target is None:
+            logger.warning("沒有可保存的預處理資料（features 或 target 為空）。")
+            return
+
+        files = self._get_preprocessed_files()
+        logger.info(f"開始保存預處理數據到目錄: {self.preprocessed_path}")
+
+        try:
+            # 保存 Numpy Arrays
+            np.save(files['features'], self.features)
+            logger.info(f"  - 特徵已保存至: {files['features']} (形狀: {self.features.shape})")
+            np.save(files['target'], self.target)
+            logger.info(f"  - 目標已保存至: {files['target']} (形狀: {self.target.shape})")
+
+            # 保存 Pickle 對象
+            with open(files['feature_names'], 'wb') as f: pickle.dump(self.feature_names, f)
+            logger.info(f"  - 特徵名稱已保存至: {files['feature_names']}")
+            with open(files['scaler'], 'wb') as f: pickle.dump(self.scaler, f)
+            logger.info(f"  - Scaler 已保存至: {files['scaler']}")
+            with open(files['label_encoder'], 'wb') as f: pickle.dump(self.label_encoder, f)
+            logger.info(f"  - LabelEncoder 已保存至: {files['label_encoder']}")
+
+            # 保存訓練/測試索引 (如果存在)
+            if self.train_indices is not None and self.test_indices is not None:
+                np.save(files['train_indices'], self.train_indices)
+                np.save(files['test_indices'], self.test_indices)
+                logger.info(f"  - 訓練/測試索引已保存至: {files['train_indices']} / {files['test_indices']}")
+
+            logger.info("預處理數據保存成功。")
+
+        except Exception as e:
+            logger.error(f"保存預處理數據時發生嚴重錯誤: {str(e)}", exc_info=True)
+            # 可以選擇刪除可能部分寫入的文件
+            for f_path in files.values():
+                 if os.path.exists(f_path):
+                      try: os.remove(f_path)
+                      except: pass
+
+
+    def _load_preprocessed_data(self) -> bool:
+        """加載預處理後的資料 (Numpy + Pickle)，並進行嚴格檢查"""
+        logger.info(f"嘗試從以下路徑加載預處理資料: {self.preprocessed_path}")
+        files = self._get_preprocessed_files()
+
+        # --- 嚴格檢查所有必要文件 ---
+        required_files = ['features', 'target', 'scaler', 'label_encoder', 'feature_names']
+        missing = [name for name in required_files if not os.path.exists(files[name])]
+        if missing:
+            logger.warning(f"必要的預處理文件缺失: {', '.join(missing)}。無法從緩存加載，將重新預處理。")
             return False
-    
-    def _enhanced_optimize_dataframe_memory(self, df):
-        """增強版DataFrame記憶體優化 - 更積極的類型轉換策略"""
+
+        logger.info("所有必要的預處理文件存在，開始加載...")
+        try:
+            with track_memory_usage("加載預處理資料"):
+                # --- 加載 Numpy Arrays ---
+                # 使用 mmap_mode='r' 嘗試記憶體映射，如果文件很大且啟用該選項
+                mmap_mode = 'r' if self.use_memory_mapping else None
+                self.features = np.load(files['features'], mmap_mode=mmap_mode)
+                logger.info(f"  - 特徵已加載，形狀: {self.features.shape}, 類型: {self.features.dtype}, 映射模式: {mmap_mode}")
+                self.target = np.load(files['target']) # 標籤通常不大，不使用映射
+                logger.info(f"  - 目標已加載，形狀: {self.target.shape}, 類型: {self.target.dtype}")
+
+                # --- 加載 Pickle 對象 ---
+                with open(files['feature_names'], 'rb') as f: self.feature_names = pickle.load(f)
+                logger.info(f"  - 特徵名稱已加載 ({len(self.feature_names)} 個)")
+                with open(files['scaler'], 'rb') as f: self.scaler = pickle.load(f)
+                logger.info(f"  - Scaler 已加載 (均值範例: {self.scaler.mean_[:3]}...)")
+                with open(files['label_encoder'], 'rb') as f: self.label_encoder = pickle.load(f)
+                logger.info(f"  - LabelEncoder 已加載 (類別: {self.label_encoder.classes_[:5]}...)")
+
+                # 驗證加載的對象
+                if not isinstance(self.scaler, StandardScaler) or not hasattr(self.scaler, 'mean_'):
+                     raise TypeError("加載的 Scaler 無效。")
+                if not isinstance(self.label_encoder, LabelEncoder) or not hasattr(self.label_encoder, 'classes_'):
+                     raise TypeError("加載的 LabelEncoder 無效。")
+                if not isinstance(self.feature_names, list):
+                    raise TypeError("加載的特徵名稱不是列表。")
+                # 驗證特徵數量是否匹配
+                if len(self.feature_names) != self.features.shape[1]:
+                     raise ValueError(f"加載的特徵名稱數量 ({len(self.feature_names)}) 與特徵數據維度 ({self.features.shape[1]}) 不匹配！")
+
+                # --- 加載訓練/測試索引 (可選) ---
+                train_idx_path = files['train_indices']
+                test_idx_path = files['test_indices']
+                if os.path.exists(train_idx_path) and os.path.exists(test_idx_path):
+                    logger.info("正在加載已保存的訓練/測試集索引...")
+                    self.train_indices = np.load(train_idx_path)
+                    self.test_indices = np.load(test_idx_path)
+                    logger.info(f"  - 訓練索引: {self.train_indices.shape}, 測試索引: {self.test_indices.shape}")
+
+                    # --- 使用索引拆分數據 ---
+                    # 驗證索引是否有效
+                    max_index = max(self.train_indices.max(), self.test_indices.max())
+                    if max_index >= self.features.shape[0]:
+                         raise IndexError(f"加載的索引 ({max_index}) 超出數據範圍 ({self.features.shape[0]})！")
+
+                    self.X_train = self.features[self.train_indices]
+                    self.X_test = self.features[self.test_indices]
+                    self.y_train = self.target[self.train_indices]
+                    self.y_test = self.target[self.test_indices]
+                    logger.info(f"已使用加載的索引拆分數據。")
+                    logger.info(f"  訓練集: X={self.X_train.shape}, y={self.y_train.shape}")
+                    logger.info(f"  測試集: X={self.X_test.shape}, y={self.y_test.shape}")
+                else:
+                    logger.info("未找到訓練/測試集索引文件，將在需要時重新拆分。")
+
+            logger.info("預處理資料加載成功。")
+            self.df = None # 預處理載入成功，原始 df 不再需要
+            if self.aggressive_gc: clean_memory()
+            print_memory_usage("預處理資料載入後")
+            return True # 返回 True 表示加載成功
+
+        except FileNotFoundError as fnf_error:
+             logger.error(f"加載預處理文件失敗：找不到文件 {fnf_error.filename}")
+             self._reset_data_attributes() # 出錯時重置
+             return False
+        except (pickle.UnpicklingError, EOFError, ValueError, TypeError, IndexError) as load_error:
+             logger.error(f"加載預處理文件時發生錯誤（文件可能已損壞或格式不兼容）: {load_error}", exc_info=True)
+             self._reset_data_attributes() # 出錯時重置
+             return False
+        except Exception as e:
+            logger.error(f"加載預處理資料時發生未知錯誤: {str(e)}", exc_info=True)
+            self._reset_data_attributes() # 出錯時重置
+            return False
+
+    def _reset_data_attributes(self):
+         """重置資料相關的屬性，通常在加載失敗後調用"""
+         logger.warning("重置資料屬性為初始狀態。")
+         self.df = None
+         self.features = None
+         self.target = None
+         self.feature_names = None
+         self.X_train = self.X_test = self.y_train = self.y_test = None
+         self.train_indices = self.test_indices = None
+         self.scaler = StandardScaler()
+         self.label_encoder = LabelEncoder()
+         gc.collect()
+
+    # --- 記憶體優化 ---
+    def _enhanced_optimize_dataframe_memory(self, df: pd.DataFrame) -> pd.DataFrame:
+        """增強版DataFrame記憶體優化 (增加 float16 警告)"""
+        if df is None or df.empty:
+            logger.warning("傳入空的 DataFrame，無法進行記憶體優化。")
+            return df
         start_mem = df.memory_usage(deep=True).sum() / (1024 * 1024)
         logger.info(f"優化前 DataFrame 記憶體使用: {start_mem:.2f} MB")
-        
-        # 複製 DataFrame 以避免修改原始數據
-        df_optimized = df.copy()
-        
-        # 處理整數型列
-        integer_columns = df_optimized.select_dtypes(include=['int']).columns
-        for col in integer_columns:
-            # 獲取列的最小值和最大值
-            col_min = df_optimized[col].min()
-            col_max = df_optimized[col].max()
-            
-            # 根據數據範圍選擇更緊湊的數據類型
-            if col_min >= 0:
-                if col_max < 2**8:
-                    df_optimized[col] = df_optimized[col].astype(np.uint8)
-                elif col_max < 2**16:
-                    df_optimized[col] = df_optimized[col].astype(np.uint16)
-                elif col_max < 2**32:
-                    df_optimized[col] = df_optimized[col].astype(np.uint32)
-                else:
-                    df_optimized[col] = df_optimized[col].astype(np.uint64)
-            else:
-                if col_min > -2**7 and col_max < 2**7:
-                    df_optimized[col] = df_optimized[col].astype(np.int8)
-                elif col_min > -2**15 and col_max < 2**15:
-                    df_optimized[col] = df_optimized[col].astype(np.int16)
-                elif col_min > -2**31 and col_max < 2**31:
-                    df_optimized[col] = df_optimized[col].astype(np.int32)
-                else:
-                    df_optimized[col] = df_optimized[col].astype(np.int64)
-                
-        # 處理浮點型列 - 積極使用float16/float32而非float64
-        float_columns = df_optimized.select_dtypes(include=['float']).columns
-        for col in float_columns:
-            # 檢查值範圍來決定是否可以使用float16
-            if self.aggressive_dtypes:
-                col_min = df_optimized[col].min()
-                col_max = df_optimized[col].max()
-                # float16範圍約為±65504
-                if col_min > -65000 and col_max < 65000:
-                    # 對於小範圍值，使用float16
-                    df_optimized[col] = df_optimized[col].astype(np.float16)
-                else:
-                    # 否則使用float32
-                    df_optimized[col] = df_optimized[col].astype(np.float32)
-            else:
-                # 保守策略：一律使用float32
-                df_optimized[col] = df_optimized[col].astype(np.float32)
-        
-        # 處理對象型列和分類型列
-        object_columns = df_optimized.select_dtypes(include=['object']).columns
-        for col in object_columns:
-            # 計算唯一值比例
-            unique_ratio = df_optimized[col].nunique() / len(df_optimized)
-            
-            # 唯一值較少的列使用分類類型 (調整閾值以更積極地使用category)
-            if unique_ratio < 0.7:  # 原為0.5，現在更積極使用category
-                df_optimized[col] = df_optimized[col].astype('category')
-                
-        # 計算優化後的記憶體使用
+
+        df_optimized = df.copy() # 操作副本
+
+        for col in df_optimized.columns:
+            col_type = df_optimized[col].dtype
+
+            if pd.api.types.is_integer_dtype(col_type):
+                # 處理整數類型
+                try:
+                    c_min = df_optimized[col].min()
+                    c_max = df_optimized[col].max()
+                    if pd.isna(c_min) or pd.isna(c_max): continue # 跳過全空的列
+
+                    if c_min >= 0: # 嘗試無符號整數
+                         if c_max < np.iinfo(np.uint8).max: df_optimized[col] = df_optimized[col].astype(np.uint8)
+                         elif c_max < np.iinfo(np.uint16).max: df_optimized[col] = df_optimized[col].astype(np.uint16)
+                         elif c_max < np.iinfo(np.uint32).max: df_optimized[col] = df_optimized[col].astype(np.uint32)
+                         else: df_optimized[col] = df_optimized[col].astype(np.uint64)
+                    else: # 有符號整數
+                         if c_min >= np.iinfo(np.int8).min and c_max <= np.iinfo(np.int8).max: df_optimized[col] = df_optimized[col].astype(np.int8)
+                         elif c_min >= np.iinfo(np.int16).min and c_max <= np.iinfo(np.int16).max: df_optimized[col] = df_optimized[col].astype(np.int16)
+                         elif c_min >= np.iinfo(np.int32).min and c_max <= np.iinfo(np.int32).max: df_optimized[col] = df_optimized[col].astype(np.int32)
+                         else: df_optimized[col] = df_optimized[col].astype(np.int64)
+                except Exception as e:
+                     logger.warning(f"優化整數列 '{col}' 時出錯: {e}") # 可能包含非數值
+            elif pd.api.types.is_float_dtype(col_type):
+                 # 處理浮點數類型
+                 try:
+                      # 優先嘗試 float32
+                      df_optimized[col] = pd.to_numeric(df_optimized[col], errors='coerce').astype(np.float32)
+                      # 如果啟用 aggressive 且條件允許，嘗試 float16
+                      if self.aggressive_dtypes:
+                          # 檢查 NaN 和範圍
+                          col_data_float32 = df_optimized[col]
+                          if np.all(np.isfinite(col_data_float32.dropna())): # 檢查非 NaN 值
+                                c_min = col_data_float32.min()
+                                c_max = col_data_float32.max()
+                                # float16 範圍檢查
+                                if not pd.isna(c_min) and not pd.isna(c_max) and \
+                                   c_min > np.finfo(np.float16).min and \
+                                   c_max < np.finfo(np.float16).max:
+                                      logger.warning(f"列 '{col}' 將積極轉換為 float16，可能損失精度。")
+                                      df_optimized[col] = col_data_float32.astype(np.float16)
+                 except Exception as e:
+                      logger.warning(f"優化浮點數列 '{col}' 時出錯: {e}")
+            elif pd.api.types.is_object_dtype(col_type):
+                 # 處理對象類型，嘗試轉換為 category
+                 try:
+                      num_unique_values = df_optimized[col].nunique()
+                      num_total_values = len(df_optimized[col])
+                      # 經驗法則：唯一值比例小於 50% 時轉換為 category 可能節省記憶體
+                      if num_total_values > 0 and num_unique_values / num_total_values < 0.5:
+                           df_optimized[col] = df_optimized[col].astype('category')
+                 except TypeError: # nunique 可能對混合類型報錯
+                      logger.debug(f"列 '{col}' 包含混合類型，無法計算 nunique，跳過 category 優化。")
+                 except Exception as e:
+                      logger.warning(f"優化對象列 '{col}' 為 category 時出錯: {e}")
+
         end_mem = df_optimized.memory_usage(deep=True).sum() / (1024 * 1024)
         logger.info(f"優化後 DataFrame 記憶體使用: {end_mem:.2f} MB")
-        logger.info(f"記憶體使用減少: {(start_mem - end_mem) / start_mem * 100:.2f}%")
-        
-        # 積極的垃圾回收
+        reduction = (start_mem - end_mem) / start_mem * 100 if start_mem > 0 else 0
+        logger.info(f"記憶體使用減少: {reduction:.2f}%")
+
         if self.aggressive_gc:
             gc.collect()
-        
-        return df_optimized
-        
-    def _load_with_incremental_processing(self, file_list):
-        """增強版增量式加載多個文件 - 使用更高效的串流處理"""
-        logger.info(f"增量式加載 {len(file_list)} 個文件 (增強串流處理)")
 
-        # 初始化 DataFrame
-        self.df = pd.DataFrame()
-        
-        # 逐個文件處理
-        for file_idx, file_path in enumerate(tqdm(file_list, desc="增量式加載CSV")):
+        return df_optimized
+
+    # --- 數據拆分 ---
+    @memory_usage_decorator
+    def split_data(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """
+        拆分訓練和測試資料集 (修正版：處理已加載的預處理數據)
+
+        返回:
+            (X_train, X_test, y_train, y_test) 作為 NumPy 數組
+        """
+        # 1. 檢查是否已從預處理文件加載了拆分數據
+        if self.train_indices is not None and self.test_indices is not None and \
+           self.features is not None and self.target is not None:
+            logger.info("檢測到已加載的訓練/測試索引和數據，直接使用。")
+            # 確保返回的是 numpy array
+            if self.X_train is None: # 可能只加載了索引，未賦值給 X/y
+                 self.X_train = self.features[self.train_indices]
+                 self.X_test = self.features[self.test_indices]
+                 self.y_train = self.target[self.train_indices]
+                 self.y_test = self.target[self.test_indices]
+                 logger.info("已使用加載的索引生成 X_train/X_test/y_train/y_test。")
+
+            # 驗證數據類型和形狀
+            if not all(isinstance(arr, np.ndarray) for arr in [self.X_train, self.X_test, self.y_train, self.y_test]):
+                 logger.warning("加載的拆分數據類型不完全是 NumPy Array，將嘗試轉換。")
+                 self.X_train = np.array(self.X_train) if not isinstance(self.X_train, np.ndarray) else self.X_train
+                 self.X_test = np.array(self.X_test) if not isinstance(self.X_test, np.ndarray) else self.X_test
+                 self.y_train = np.array(self.y_train) if not isinstance(self.y_train, np.ndarray) else self.y_train
+                 self.y_test = np.array(self.y_test) if not isinstance(self.y_test, np.ndarray) else self.y_test
+
+            # 再次檢查形狀
+            if self.X_train.shape[0] != self.y_train.shape[0] or self.X_test.shape[0] != self.y_test.shape[0]:
+                 logger.error("加載的訓練或測試集特徵與標籤數量不匹配！")
+                 # 可能需要重新拆分，這裡先拋出錯誤
+                 raise ValueError("加載的拆分數據行數不匹配。")
+
+            return self.X_train, self.X_test, self.y_train, self.y_test
+
+        # 2. 如果尚未拆分，或者預處理數據未包含拆分信息
+        logger.info("未找到預加載的拆分數據，執行數據拆分...")
+        if self.features is None or self.target is None:
+             logger.info("Features 或 Target 為空，嘗試執行 preprocess()...")
+             self.preprocess() # preprocess 會返回 numpy arrays 並設置 self.features/target
+             if self.features is None or self.target is None:
+                  raise RuntimeError("預處理後未能獲取特徵或目標數據，無法拆分。")
+
+        # 確保 features 和 target 是 NumPy 數組
+        if not isinstance(self.features, np.ndarray): self.features = np.array(self.features)
+        if not isinstance(self.target, np.ndarray): self.target = np.array(self.target)
+
+        logger.info(f"拆分資料集: 特徵 {self.features.shape}, 目標 {self.target.shape}, 測試集比例 {self.test_size}")
+
+        # 生成索引並拆分
+        indices = np.arange(len(self.target))
+        try:
+            # 嘗試分層拆分
+            self.train_indices, self.test_indices = train_test_split(
+                indices,
+                test_size=self.test_size,
+                random_state=self.random_state,
+                stratify=self.target # 使用 NumPy target array 進行分層
+            )
+            logger.info("成功執行分層拆分。")
+        except ValueError as e:
+             logger.warning(f"分層拆分失敗 ({e})，可能是由於某些類別樣本數不足。將嘗試非分層拆分。")
+             self.train_indices, self.test_indices = train_test_split(
+                indices,
+                test_size=self.test_size,
+                random_state=self.random_state
+            )
+             logger.info("已執行非分層拆分。")
+
+        # 3. 使用索引獲取訓練集和測試集
+        self.X_train = self.features[self.train_indices]
+        self.X_test = self.features[self.test_indices]
+        self.y_train = self.target[self.train_indices]
+        self.y_test = self.target[self.test_indices]
+
+        # 4. 保存索引（如果啟用了預處理保存）
+        if self.save_preprocessed:
+            files = self._get_preprocessed_files()
             try:
-                # 對於大文件使用分塊處理
-                file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
-                
-                if file_size_mb > 500:  # 大於500MB的文件
-                    # 估計合理的分塊大小
-                    sample_size = 1000
-                    sample_df = pd.read_csv(file_path, nrows=sample_size)
-                    avg_row_size_bytes = sample_df.memory_usage(deep=True).sum() / len(sample_df)
-                    
-                    # 算出每個批次的行數 (目標每批次100MB)
-                    rows_per_chunk = int((100 * 1024 * 1024) / avg_row_size_bytes)
-                    logger.info(f"大文件分塊處理，每批次約 {rows_per_chunk} 行")
-                    
-                    # 分塊讀取
-                    dfs = []
-                    for chunk in pd.read_csv(file_path, chunksize=rows_per_chunk, low_memory=False):
-                        # 優化記憶體使用
-                        chunk = self._enhanced_optimize_dataframe_memory(chunk)
-                        dfs.append(chunk)
-                        
-                        # 定期合併以釋放記憶體
-                        if len(dfs) >= 5:
-                            df_merged = pd.concat(dfs, ignore_index=True)
-                            if self.df.empty:
-                                self.df = df_merged
-                            else:
-                                self.df = pd.concat([self.df, df_merged], ignore_index=True)
-                            
-                            # 清理中間df
-                            dfs = []
-                            gc.collect()
-                    
-                    # 處理剩餘的塊
-                    if dfs:
-                        df_merged = pd.concat(dfs, ignore_index=True)
-                        if self.df.empty:
-                            self.df = df_merged
-                        else:
-                            self.df = pd.concat([self.df, df_merged], ignore_index=True)
-                else:
-                    # 小文件直接讀取
-                    df = pd.read_csv(file_path, low_memory=False)
-                    df = self._enhanced_optimize_dataframe_memory(df)
-                    
-                    if self.df.empty:
-                        self.df = df
-                    else:
-                        self.df = pd.concat([self.df, df], ignore_index=True)
-                
-                logger.info(f"已處理文件 {file_idx+1}/{len(file_list)}: {file_path}")
-                
-                # 定期垃圾回收
-                if (file_idx + 1) % 3 == 0:
-                    gc.collect()
-                    
+                np.save(files['train_indices'], self.train_indices)
+                np.save(files['test_indices'], self.test_indices)
+                logger.info("已保存訓練集和測試集索引到預處理目錄。")
             except Exception as e:
-                logger.error(f"處理文件失敗 {file_path}: {str(e)}")
-        
-        if self.df.empty:
-            raise ValueError("所有文件均處理失敗")
-            
-        logger.info(f"增量式加載完成，DataFrame形狀: {self.df.shape}")
-    
-    def _load_single_file_incrementally(self, file_path):
-        """增量式加載單個CSV文件 - 使用分塊處理"""
-        logger.info(f"增量式加載單個文件: {file_path}")
-        
-        # 檢查文件大小
-        file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
-        logger.info(f"文件大小: {file_size_mb:.2f} MB")
-        
-        # 對於大文件使用分塊處理
-        if file_size_mb > 300:  # 大於300MB
-            # 估計合理的分塊大小
-            sample_size = 1000
-            sample_df = pd.read_csv(file_path, nrows=sample_size)
-            avg_row_size_bytes = sample_df.memory_usage(deep=True).sum() / len(sample_df)
-            
-            # 算出每個批次的行數 (目標每批次100MB)
-            rows_per_chunk = int((100 * 1024 * 1024) / avg_row_size_bytes)
-            logger.info(f"大文件分塊處理，每批次約 {rows_per_chunk} 行")
-            
-            # 分塊讀取
-            dfs = []
-            for i, chunk in enumerate(tqdm(pd.read_csv(file_path, chunksize=rows_per_chunk, low_memory=False), desc="分塊處理")):
-                # 優化記憶體使用
-                chunk = self._enhanced_optimize_dataframe_memory(chunk)
-                dfs.append(chunk)
-                
-                # 定期合併以釋放記憶體
-                if len(dfs) >= 5:
-                    self.df = pd.concat(dfs, ignore_index=True)
-                    
-                    # 清理中間df
-                    dfs = []
-                    gc.collect()
-            
-            # 處理剩餘的塊
-            if dfs:
-                if self.df is None:
-                    self.df = pd.concat(dfs, ignore_index=True)
-                else:
-                    self.df = pd.concat([self.df] + dfs, ignore_index=True)
-        else:
-            # 小文件直接讀取
-            self.df = pd.read_csv(file_path, low_memory=False)
-            self.df = self._enhanced_optimize_dataframe_memory(self.df)
-            
-        logger.info(f"載入完成，DataFrame形狀: {self.df.shape}")
-    
-    def _load_data_at_once(self, file_list):
-        """一次性加載所有CSV文件"""
-        logger.info(f"一次性加載 {len(file_list)} 個文件")
-        
-        # 讀取所有文件並合併
-        dfs = []
-        for file_path in tqdm(file_list, desc="載入文件"):
+                 logger.error(f"保存訓練/測試索引時出錯: {e}")
+
+        logger.info(f"數據拆分完成:")
+        logger.info(f"  訓練集: X={self.X_train.shape}, y={self.y_train.shape}")
+        logger.info(f"  測試集: X={self.X_test.shape}, y={self.y_test.shape}")
+
+        return self.X_train, self.X_test, self.y_train, self.y_test
+
+    # --- 其他輔助方法 ---
+    def get_attack_types(self) -> Dict[int, Any]:
+        """取得攻擊類型（標籤編碼後的數字）到原始類別名稱的對應表"""
+        if hasattr(self.label_encoder, 'classes_') and self.label_encoder.classes_ is not None:
             try:
-                df = pd.read_csv(file_path, low_memory=False)
-                df = optimize_dataframe_memory(df)  # 使用全局函數避免self引用
-                dfs.append(df)
-                
-                # 檢查是否有記憶體壓力
-                if get_memory_usage()['percent'] > 80:
-                    logger.warning("記憶體使用率過高，將提前合併並清理")
-                    temp_df = pd.concat(dfs, ignore_index=True)
-                    dfs = [temp_df]
-                    gc.collect()
-                    
+                # 確保 classes_ 是 iterable
+                classes_ = list(self.label_encoder.classes_)
+                return {i: label for i, label in enumerate(classes_)}
             except Exception as e:
-                logger.error(f"讀取文件失敗 {file_path}: {str(e)}")
-                
-        # 合併所有DataFrame
-        if dfs:
-            self.df = pd.concat(dfs, ignore_index=True)
-            logger.info(f"合併完成，DataFrame形狀: {self.df.shape}")
-            
-            # 釋放記憶體
-            del dfs
-            gc.collect()
+                 logger.error(f"從 LabelEncoder 獲取類別時出錯: {e}")
+                 return {}
         else:
-            raise ValueError("所有文件均載入失敗")
-            
-    def _load_single_file_with_polars(self, file_path):
-        """使用Polars高效載入單個文件"""
-        logger.info(f"使用Polars載入單個文件: {file_path}")
-        
-        if not POLARS_AVAILABLE:
-            logger.warning("Polars不可用，回退到標準載入方法")
-            self._load_single_file_incrementally(file_path)
+             logger.warning("LabelEncoder 未訓練或 classes_ 屬性不可用，無法獲取攻擊類型映射。")
+             # 嘗試從 target 猜測（如果 target 已編碼）
+             if self.target is not None:
+                  try:
+                       unique_numeric_labels = sorted(np.unique(self.target))
+                       logger.warning("嘗試從 target 數據推斷類別標籤。")
+                       return {i: f"推斷類別_{i}" for i in unique_numeric_labels}
+                  except Exception:
+                       return {}
+             return {}
+
+    def _sample_data(self):
+        """對 self.df 進行採樣 (修正版：處理空 DataFrame 和分層採樣邊界情況)"""
+        if self.df is None or self.df.empty:
+            logger.warning("DataFrame 為空，無法進行採樣。")
             return
-            
-        try:
-            # 使用LazyFrame高效載入
-            lf = pl.scan_csv(file_path)
-            
-            # 應用採樣(如果需要)
-            if self.use_sampling and self.sampling_strategy == 'random':
-                lf = lf.sample(fraction=self.sampling_ratio)
-                
-            # 收集DataFrame
-            pf = lf.collect()
-            logger.info(f"Polars成功載入，形狀: {pf.shape}")
-            
-            # 轉換為Pandas DataFrame
-            self.df = pf.to_pandas()
-            
-            # 釋放記憶體
-            del pf
-            gc.collect()
-        except Exception as e:
-            logger.error(f"Polars載入失敗: {str(e)}")
-            logger.info("回退到標準載入方法")
-            self._load_single_file_incrementally(file_path)
-            
-    def _load_with_polars(self, file_list):
-        """使用Polars高效載入多個文件"""
-        logger.info(f"使用Polars載入 {len(file_list)} 個文件")
-        
-        try:
-            # 使用Polars的lazy執行模式逐個載入文件
-            dfs = []
-            for i, file_path in enumerate(tqdm(file_list, desc="使用Polars載入")):
-                try:
-                    # 使用LazyFrame進行高效讀取和處理
-                    lf = pl.scan_csv(file_path)
-                    
-                    # 應用篩選(如果需要)
-                    if self.use_sampling:
-                        if self.sampling_strategy == 'random':
-                            # 隨機採樣
-                            lf = lf.sample(fraction=self.sampling_ratio)
-                        # 注意：Polars的lazy API不直接支持分層採樣，需在收集後處理
-                    
-                    # 收集DataFrame
-                    df = lf.collect()
-                    dfs.append(df)
-                    
-                    logger.info(f"Polars成功載入: {file_path}, 形狀: {df.shape}")
-                    
-                    # 定期釋放記憶體
-                    if (i + 1) % 3 == 0:
-                        gc.collect()
-                except Exception as e:
-                    logger.error(f"Polars載入 {file_path} 失敗: {str(e)}")
-            
-            # 合併所有DataFrame
-            if dfs:
-                logger.info(f"合併 {len(dfs)} 個Polars DataFrame")
-                combined_df = pl.concat(dfs)
-                
-                # 將Polars DataFrame轉換為Pandas DataFrame(保持與其他代碼兼容)
-                self.df = combined_df.to_pandas()
-                logger.info(f"合併完成，DataFrame形狀: {self.df.shape}")
-                
-                # 釋放記憶體
-                del dfs, combined_df
-                gc.collect()
-            else:
-                raise ValueError("所有文件均載入失敗")
-                
-        except Exception as e:
-            logger.error(f"Polars載入過程中發生錯誤: {str(e)}")
-            logger.info("回退到標準載入方法")
-            
-            if self.incremental_loading:
-                self._load_with_incremental_processing(file_list)
-            else:
-                self._load_data_at_once(file_list)
-                
-    def _process_parquet_with_polars(self, parquet_files):
-        """使用Polars高效處理Parquet文件"""
-        logger.info(f"使用Polars處理 {len(parquet_files)} 個Parquet文件")
-        
-        if not POLARS_AVAILABLE:
-            logger.warning("Polars不可用，回退到PyArrow處理")
-            return False
-            
-        try:
-            # 使用Polars的LazyFrame高效讀取Parquet
-            dfs = []
-            
-            for i, parquet_file in enumerate(tqdm(parquet_files, desc="Polars讀取Parquet")):
-                try:
-                    # 使用scan_parquet比直接read_parquet更節省記憶體
-                    lf = pl.scan_parquet(parquet_file)
-                    
-                    # 應用採樣（如果需要）
-                    if self.use_sampling and self.sampling_strategy == 'random':
-                        lf = lf.sample(fraction=self.sampling_ratio)
-                        
-                    # 收集DataFrame - 使用批次以節省記憶體
-                    df = lf.collect()
-                    dfs.append(df)
-                    
-                    logger.info(f"Polars成功讀取Parquet: {parquet_file}, 形狀: {df.shape}")
-                    
-                    # 定期釋放記憶體
-                    if (i + 1) % 3 == 0:
-                        # 合併已處理的DataFrame
-                        if len(dfs) > 1:
-                            combined = pl.concat(dfs)
-                            dfs = [combined]
-                            
-                        # 強制垃圾回收
-                        gc.collect()
-                except Exception as e:
-                    logger.error(f"Polars讀取Parquet失敗 {parquet_file}: {str(e)}")
-                    
-            # 合併所有DataFrame
-            if dfs:
-                logger.info(f"合併 {len(dfs)} 個Polars DataFrame")
-                
-                # 使用concat而非較慢的vstack
-                if len(dfs) > 1:
-                    combined_df = pl.concat(dfs)
+
+        label_column = self._identify_target_column()
+        if label_column not in self.df.columns:
+             logger.error(f"採樣錯誤：找不到目標列 '{label_column}'。跳過採樣。")
+             return
+
+        original_size = len(self.df)
+        target_size = int(original_size * self.sampling_ratio)
+
+        # 如果採樣比例無效或不需要採樣
+        if not (0 < self.sampling_ratio < 1) or target_size >= original_size:
+             logger.info(f"採樣比例 ({self.sampling_ratio}) 無效或無需採樣，跳過。")
+             return
+
+        logger.info(f"執行數據採樣: 原始大小={original_size}, 目標大小={target_size}, 策略='{self.sampling_strategy}'")
+
+        sampled_indices = None
+        if self.sampling_strategy == 'stratified':
+            logger.info("嘗試分層採樣...")
+            try:
+                y_stratify = self.df[label_column]
+                value_counts = y_stratify.value_counts()
+                # 檢查是否有類別樣本數過少 (少於 2 無法分層)
+                if (value_counts < 2).any():
+                    logger.warning(f"檢測到樣本數少於 2 的類別: {value_counts[value_counts < 2].index.tolist()}。無法進行分層採樣，將使用隨機採樣。")
+                    self.sampling_strategy = 'random' # 回退到隨機
                 else:
-                    combined_df = dfs[0]
-                
-                # 對於分層採樣，在這裡處理
-                if self.use_sampling and self.sampling_strategy == 'stratified' and 'label' in combined_df.columns:
-                    # 對每個類別單獨採樣
-                    sampled_dfs = []
-                    
-                    # 獲取唯一標籤
-                    labels = combined_df.select('label').unique().to_series()
-                    
-                    for lbl in labels:
-                        # 過濾單一類別的資料
-                        class_df = combined_df.filter(pl.col('label') == lbl)
-                        class_size = class_df.shape[0]
-                        
-                        # 計算採樣數量
-                        sample_size = max(
-                            int(class_size * self.sampling_ratio),
-                            min(self.min_samples_per_class, class_size)
-                        )
-                        
-                        # 採樣並添加到結果中
-                        if sample_size < class_size:
-                            sampled_class = class_df.sample(n=sample_size)
-                            sampled_dfs.append(sampled_class)
-                        else:
-                            sampled_dfs.append(class_df)
-                            
-                    # 合併所有採樣後的類別
-                    if sampled_dfs:
-                        combined_df = pl.concat(sampled_dfs)
-                        logger.info(f"分層採樣後大小: {combined_df.shape[0]}")
-                
-                # 轉換為Pandas DataFrame以便與其他代碼兼容
-                self.df = combined_df.to_pandas()
-                logger.info(f"Polars處理完成，DataFrame形狀: {self.df.shape}")
-                
-                # 釋放記憶體
-                del dfs, combined_df
-                gc.collect()
-                
-                return True
+                     # train_size 設置為目標比例
+                     sampled_indices, _ = train_test_split(
+                         self.df.index, # 使用索引進行拆分
+                         train_size=self.sampling_ratio,
+                         random_state=self.random_state,
+                         stratify=y_stratify
+                     )
+                     logger.info(f"分層採樣完成，選中 {len(sampled_indices)} 個樣本。")
+
+            except Exception as e:
+                 logger.error(f"分層採樣過程中出錯: {e}。將使用隨機採樣。", exc_info=True)
+                 self.sampling_strategy = 'random' # 出錯時回退
+
+        # 如果需要隨機採樣 (包括從分層回退的情況)
+        if self.sampling_strategy == 'random' or sampled_indices is None:
+             logger.info("執行隨機採樣...")
+             if target_size <= 0: # 避免 target_size 為 0 或負數
+                  logger.warning(f"計算出的目標採樣大小 ({target_size}) 無效，跳過採樣。")
+                  return
+             sampled_indices = np.random.choice(self.df.index, size=target_size, replace=False)
+             logger.info(f"隨機採樣完成，選中 {len(sampled_indices)} 個樣本。")
+
+        # 使用選中的索引更新 DataFrame
+        if sampled_indices is not None:
+             self.df = self.df.loc[sampled_indices].copy() # 使用 .loc 和 .copy() 避免警告
+             logger.info(f"採樣後 DataFrame 大小: {len(self.df)} 行")
+             new_class_counts = self.df[label_column].value_counts()
+             logger.info(f"採樣後類別分布:\n{new_class_counts}")
+        else:
+             logger.error("未能生成採樣索引，採樣失敗。")
+
+        if self.aggressive_gc: gc.collect()
+
+
+    @memory_usage_decorator
+    def get_sample_batch(self, batch_size: Optional[int] = None) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """
+        獲取一個批次的樣本，通常用於測試或演示 (修正版，使用已拆分的測試集)
+
+        參數:
+            batch_size: 批次大小，如果為 None，則使用配置中的 batch_size
+
+        返回:
+            (batch_features, batch_labels, original_indices): 特徵、標籤和對應的原始數據索引 (如果可用)
+        """
+        current_batch_size = batch_size if batch_size is not None else self.batch_size
+
+        # 1. 確保測試集數據已準備好
+        if self.X_test is None or self.y_test is None:
+            logger.info("測試集數據不可用，嘗試執行 split_data()...")
+            try:
+                self.split_data() # split_data 會處理 preprocess 的調用（如果需要）
+            except Exception as e:
+                 logger.error(f"準備測試數據時出錯: {e}", exc_info=True)
+                 # 返回空數組表示失敗
+                 return np.array([]), np.array([]), np.array([])
+
+        if self.X_test is None or self.y_test is None or len(self.y_test) == 0:
+            logger.warning("無法獲取樣本批次，測試數據不可用或為空。")
+            return np.array([]), np.array([]), np.array([])
+
+        # 2. 從測試集隨機採樣
+        num_test_samples = len(self.y_test)
+        actual_batch_size = min(current_batch_size, num_test_samples)
+        if actual_batch_size <= 0:
+             logger.warning(f"請求的批次大小 ({actual_batch_size}) 無效。")
+             return np.array([]), np.array([]), np.array([])
+
+        # 隨機選擇測試集內的索引
+        random_indices_in_test_set = np.random.choice(num_test_samples, size=actual_batch_size, replace=False)
+
+        # 3. 獲取對應的數據
+        batch_features = self.X_test[random_indices_in_test_set]
+        batch_labels = self.y_test[random_indices_in_test_set]
+
+        # 4. 獲取這些樣本在原始數據中的索引（如果可用）
+        if self.test_indices is not None:
+            # 確保 test_indices 的長度與 X_test/y_test 匹配
+            if len(self.test_indices) == num_test_samples:
+                 original_indices = self.test_indices[random_indices_in_test_set]
             else:
-                logger.warning("Polars處理未產生任何有效資料")
-                return False
-                
-        except Exception as e:
-            logger.error(f"Polars處理Parquet文件過程中發生錯誤: {str(e)}")
-            return False
+                 logger.warning("測試索引長度與測試數據不匹配，無法提供原始索引。")
+                 # 返回相對於測試集的索引作為替代
+                 original_indices = random_indices_in_test_set
+        else:
+            # 如果沒有保存原始索引，返回相對於測試集的索引
+            original_indices = random_indices_in_test_set
+            logger.debug("未找到原始測試索引，返回相對於測試集的索引。")
+
+        return batch_features, batch_labels, original_indices
+
+
+    def build_graph(self, features: Optional[Union[np.ndarray, torch.Tensor]] = None,
+                  target: Optional[Union[np.ndarray, torch.Tensor]] = None,
+                  graph_creation_config: Optional[Dict[str, Any]] = None) -> Optional[dgl.DGLGraph]:
+         """
+         使用提供的特徵和目標數據建立一個靜態 DGL 圖。
+
+         參數:
+             features: 節點特徵 (NumPy array 或 Tensor, [num_nodes, feat_dim])。如果為 None，則使用 self.features。
+             target: 節點標籤 (NumPy array 或 Tensor, [num_nodes])。如果為 None，則使用 self.target。
+             graph_creation_config: 建立圖的特定配置 (例如 'method', 'k')，如果為 None，則使用預設值。
+
+         返回:
+             dgl.DGLGraph: 創建的圖 (包含 'feat' 和 'label' 數據) 或 None
+         """
+         # 獲取數據
+         current_features = features if features is not None else self.features
+         current_target = target if target is not None else self.target
+
+         if current_features is None or current_target is None:
+             logger.error("無法建立靜態圖，缺少特徵或目標數據。請先運行 preprocess()。")
+             return None
+
+         # 解析圖建立配置
+         cfg = graph_creation_config or {}
+         method = cfg.get('method', 'knn') # 預設使用 KNN
+         k = int(cfg.get('k', 5))          # KNN 的鄰居數
+         target_device = cfg.get('device', self.device) # 最終圖所在的設備
+
+         n_nodes = current_features.shape[0]
+         if n_nodes != len(current_target):
+             logger.error(f"建立靜態圖錯誤：特徵行數 ({n_nodes}) 與目標數量 ({len(current_target)}) 不匹配！")
+             return None
+
+         logger.info(f"基於提供的數據建立靜態圖，方法: {method}，節點數: {n_nodes}")
+
+         # 確保數據是 Tensor
+         if isinstance(current_features, np.ndarray): features_tensor = torch.tensor(current_features, dtype=torch.float32)
+         else: features_tensor = current_features.float() # 假設是 Tensor，確保 float32
+
+         if isinstance(current_target, np.ndarray): target_tensor = torch.tensor(current_target, dtype=torch.long)
+         else: target_tensor = current_target.long() # 假設是 Tensor，確保 long
+
+         g = None
+         if method == 'knn':
+             from sklearn.neighbors import kneighbors_graph # 延遲導入
+             try:
+                 # 將特徵移到 CPU 進行 KNN 計算
+                 features_cpu = features_tensor.cpu().numpy()
+                 # 清理 NaN/Inf
+                 if np.any(np.isnan(features_cpu)) or np.any(np.isinf(features_cpu)):
+                     logger.warning("靜態圖建立 (KNN)：特徵包含 NaN/Inf，使用 0 填充。")
+                     features_cpu = np.nan_to_num(features_cpu, nan=0.0, posinf=0.0, neginf=0.0)
+
+                 logger.info(f"計算 KNN 圖 (k={k})...")
+                 adj_matrix = kneighbors_graph(features_cpu, n_neighbors=k, mode='connectivity', include_self=False)
+                 src, dst = adj_matrix.nonzero()
+                 logger.info(f"KNN 圖邊數: {len(src)}")
+
+                 # 創建 DGL 圖 (先在 CPU)
+                 g = dgl.graph((src, dst), num_nodes=n_nodes, device='cpu')
+
+             except ImportError:
+                 logger.error("建立 KNN 圖需要安裝 scikit-learn。請運行 'pip install scikit-learn'。")
+                 return None
+             except Exception as e:
+                 logger.error(f"建立 KNN 圖時出錯: {e}", exc_info=True)
+                 return None
+         # 可以添加其他 edge_creation_method 的實現，例如基於閾值的相似度圖等
+         else:
+             logger.error(f"不支持的靜態圖邊創建方法: {method}")
+             return None
+
+         # 添加節點特徵和標籤到圖 (使用原始 Tensor，可能在 GPU 上)
+         g.ndata['feat'] = features_tensor
+         g.ndata['label'] = target_tensor
+
+         logger.info(f"靜態圖建立完成: {g.num_nodes()} 節點, {g.num_edges()} 邊")
+         # 將圖移到目標設備
+         try:
+             g = g.to(target_device)
+             logger.info(f"靜態圖已移至設備: {g.device}")
+         except Exception as e:
+              logger.error(f"無法將靜態圖移至設備 {target_device}: {e}")
+              # 可以選擇返回 CPU 上的圖或返回 None
+              # return g.to('cpu')
+              return None
+
+         return g
